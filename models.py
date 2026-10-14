@@ -20,7 +20,7 @@ class Encoder1(nn.Module):
         self.c3 = nn.Conv1d(in_channels=12, out_channels=8, kernel_size=4, stride=4, padding=0, bias=False) # ol = 64
         self.bn3 = nn.BatchNorm1d(num_features=8) 
         self.fc = nn.Linear(in_features=512, out_features=64, bias = False)
-        self.act = nn.LeakyReLU(negative_slope=1e-2)
+        self.act = nn.LeakyReLU(negative_slope=negative_slope)
 
     def forward(self,x):
         x = self.act(self.bn1(self.c1(x)))
@@ -39,7 +39,7 @@ class Decoder1(nn.Module):
         self.ct3 = nn.ConvTranspose1d(in_channels=12, out_channels=8, kernel_size=2, stride=2, padding=0, bias=False) #ol = 2048
         self.bn3 = nn.BatchNorm1d(num_features=8)
         self.ct4 = nn.Conv1d(in_channels=8, out_channels=1, kernel_size=7, stride=1, padding=3, bias=False)
-        self.act = nn.LeakyReLU(negative_slope=1e-2)
+        self.act = nn.LeakyReLU(negative_slope=negative_slope)
 
     def forward(self, x):
         x = x.unsqueeze(1)
@@ -47,3 +47,12 @@ class Decoder1(nn.Module):
         x = self.act(self.bn2(self.ct2(x)))
         x = self.act(self.bn3(self.ct3(x)))
         return self.ct4(x)
+
+
+class Autoencoder_CNN_1(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.encoder = Encoder1()
+        self.decoder = Decoder1()
+    def forward(self,x):
+        return self.decoder(self.encoder(x))
