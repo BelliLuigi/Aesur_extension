@@ -35,7 +35,7 @@ def get_conv1d_params(in_length: int, out_length: int, in_channels: int, out_cha
     """
     candidates = []
     for stride in [1, 2, 4, 8]:
-        for kernel_size in range(2, 17):
+        for kernel_size in range(2, 50):
             for padding in range(kernel_size):
                 num = in_length + 2 * padding - kernel_size
                 if num >= 0 and num % stride == 0:
@@ -72,7 +72,7 @@ def get_conv_transpose1d_params(
     """
     candidates = []
     for stride in [1, 2, 4, 8]:
-        for kernel_size in range(2, 17):
+        for kernel_size in range(2, 50):
             for padding in range(kernel_size):
                 l_out = (in_length - 1) * stride - 2 * padding + kernel_size
                 if l_out == out_length:

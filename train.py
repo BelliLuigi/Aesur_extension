@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from utils import get_phase
 from torch import Tensor
-from torch.utils.data import random_split, TensorDataset
+from torch.utils.data import random_split
 import h5py
 import numpy as np
 from torch.optim import Adam, lr_scheduler
