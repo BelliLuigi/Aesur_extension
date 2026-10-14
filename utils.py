@@ -3,21 +3,18 @@ import torch
 import torch.nn as nn
 
 
-def separate_phase_ampl(dataset):
+def get_phase(dataset):
     '''
-    Separates phase and amplitude in 2 distinct datasets
     Inputs:
         dataset: complex dataset
     Outputs:
         ampl: amplitude dataset
         phase: phase dataset
     '''
-
-    ampl = abs(dataset)
     phase_non = -1*np.unwrap(np.angle(dataset))/100
     out = phase_non
     phase= out-out[..., np.newaxis,0]
-    return [ampl, phase]
+    return phase
 
 
 
@@ -117,8 +114,9 @@ def train_one_epoch(model, optimizer, loss_fn, device, epoch_index, tb_writer, l
         if i % 10 == 9:
             last_loss = running_loss / 100
             print(f"  batch {i + 1} loss: {last_loss:.6f}")
-            tb_x = epoch_index * len(loader) + i + 1
-            tb_writer.add_scalar("Loss/train", last_loss, tb_x)
+            if tb_writer is not None:
+                tb_x = epoch_index * len(loader) + i + 1
+                tb_writer.add_scalar("Loss/train", last_loss, tb_x)
             running_loss = 0.0
 
     return last_loss

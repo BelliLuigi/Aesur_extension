@@ -1,0 +1,19 @@
+universe = vanilla
+
+executable              = condor.sh
+arguments               = $(Process)
+log                     = condor_logs/test.log 
+output                  = condor_logs/outfile.$(Cluster).$(Process).out
+error                   = condor_logs/errors.$(Cluster).$(Process).err
+
+
+
+getenv = True
+request_cpus   = 8
+request_memory = 16384
+request_gpus = 1
+
+#+UseNvidiaA100 = False
+
+queue
+
