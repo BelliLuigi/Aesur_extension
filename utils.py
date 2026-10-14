@@ -113,7 +113,7 @@ def train_one_epoch(model, optimizer, loss_fn, device, epoch_index, tb_writer, l
         running_loss += loss.item()
         if i % 10 == 9:
             last_loss = running_loss / 100
-            print(f"  batch {i + 1} loss: {last_loss:.6f}")
+            #print(f"  batch {i + 1} loss: {last_loss:.6f}")
             if tb_writer is not None:
                 tb_x = epoch_index * len(loader) + i + 1
                 tb_writer.add_scalar("Loss/train", last_loss, tb_x)

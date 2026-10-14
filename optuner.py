@@ -3,6 +3,7 @@ import numpy as np
 import optuna
 import torch
 import torch.nn as nn
+import joblib
 from torch.optim import AdamW, lr_scheduler
 from torch.utils.data import DataLoader, random_split
 
@@ -10,7 +11,8 @@ from models import Autoencoder_CNN_1
 from utils import get_phase, train_one_epoch
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+filepath = "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
+old_filepath = "nonhyb_noprec_dataset_q8.hdf"
 
 def validate(model, val_loader, loss_fn, device):
     model.eval()
@@ -27,7 +29,7 @@ def validate(model, val_loader, loss_fn, device):
 
 
 def load_datasets():
-    with h5py.File("nonhyb_noprec_dataset_q8.hdf", "r") as f:
+    with h5py.File(filepath, "r") as f:
         waveforms_ds = f["Waveforms"]
         n_samples, sample_len = waveforms_ds.shape
         amplitude = np.empty((n_samples, sample_len), dtype=np.float32)
@@ -139,3 +141,10 @@ if __name__ == "__main__":
     print(f"  Validation Loss: {study_phase.best_value:.6f}")
     for k, v in study_phase.best_params.items():
         print(f"  {k}: {v}")
+
+    # Save studies and CSV reports
+    joblib.dump(study_amplitude, "ae_amplitude_study.pkl")
+    joblib.dump(study_phase, "ae_phase_study.pkl")
+    study_amplitude.trials_dataframe().to_csv("ae_amplitude_study.csv", index=False)
+    study_phase.trials_dataframe().to_csv("ae_phase_study.csv", index=False)
+    print("\nSaved studies: ae_amplitude_study.pkl, ae_phase_study.pkl")
