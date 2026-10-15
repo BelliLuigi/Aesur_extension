@@ -225,7 +225,13 @@ __marimo__/
 
 *.hdf
 *.npy
+
+## dirs
 runs/*
+datasets/*
+
+## files
 *.ipynb
 *.pkl
 *.db
+
