@@ -16,7 +16,10 @@ from datetime import datetime
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ## Load dataset from hdf
 
-with h5py.File("nonhyb_noprec_dataset_q8.hdf", "r") as f:
+filepath = "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
+old_filepath = "nonhyb_noprec_dataset_q8.hdf"
+
+with h5py.File(filepath, "r") as f:
     waveforms_ds = f["Waveforms"]
     n_samples, sample_len = waveforms_ds.shape
     amplitude = np.empty((n_samples, sample_len), dtype=np.float32)
@@ -38,23 +41,23 @@ p_train, p_val, p_test = random_split(phase_tensor, [0.8,0.1,0.1], generator=tor
 a_train_loader = DataLoader(a_train, batch_size = 128, shuffle= True)
 a_val_loader = DataLoader(a_val, batch_size=256, shuffle=False)
 a_test_loader = DataLoader(a_test, batch_size=256, shuffle=False)
-p_train_loader = DataLoader(p_train, batch_size = 128, shuffle= True)
+p_train_loader = DataLoader(p_train, batch_size = 64, shuffle= True)
 p_val_loader = DataLoader(p_val, batch_size=256, shuffle=False)
 p_test_loader = DataLoader(p_test, batch_size=256, shuffle=False)
 
 
-model1 = Autoencoder_CNN_1().to(device)
-model2 = Autoencoder_CNN_1().to(device)
+model1 = Autoencoder_CNN_1(negative_slope=0.1619).to(device) # amplitude
+model2 = Autoencoder_CNN_1(negative_slope=0.0859).to(device) #phase
 
 ## Loss function
 loss_fn1 = nn.L1Loss(reduction='mean')
 loss_fn2 = nn.L1Loss(reduction='mean')
 
 # Optimizer function
-opt_fn1 = Adam(model1.parameters(), lr=1e-3, weight_decay=0)
-scheduler1 = lr_scheduler.ReduceLROnPlateau(opt_fn1, factor=0.5, patience=10, threshold=0.01, threshold_mode='rel')
-opt_fn2 = Adam(model2.parameters(), lr=1e-3, weight_decay=0)
-scheduler2 = lr_scheduler.ReduceLROnPlateau(opt_fn2, factor=0.5, patience=10, threshold=0.01, threshold_mode='rel')
+opt_fn1 = Adam(model1.parameters(), lr=0.0068, weight_decay=1.4e-6)
+scheduler1 = lr_scheduler.ReduceLROnPlateau(opt_fn1, factor=0.2, patience=5, threshold=0.01, threshold_mode='rel')
+opt_fn2 = Adam(model2.parameters(), lr=0.0071, weight_decay=0.0098)
+scheduler2 = lr_scheduler.ReduceLROnPlateau(opt_fn2, factor=0.2, patience=6, threshold=0.01, threshold_mode='rel')
 
 
 def validate(model, val_loader, loss_fn):

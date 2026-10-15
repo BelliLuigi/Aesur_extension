@@ -227,3 +227,5 @@ __marimo__/
 *.npy
 runs/*
 *.ipynb
+*.pkl
+*.db

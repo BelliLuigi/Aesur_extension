@@ -13,7 +13,6 @@ request_cpus   = 8
 request_memory = 16384
 request_gpus = 1
 
-#+UseNvidiaA100 = False
 
 queue
 
