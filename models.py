@@ -59,3 +59,57 @@ class Autoencoder_CNN_1(nn.Module):
         self.decoder = Decoder1(negative_slope=negative_slope)
     def forward(self,x):
         return self.decoder(self.encoder(x))
+
+
+### Double features AE
+
+class Encoder2(nn.Module):
+    def __init__(self, negative_slope: float = 0.2):
+        '''
+        So joint AutoEncoder that takes in input Ampl and phase together as 2 channels
+        '''
+        super().__init__()
+        self.c1 = nn.Conv1d(in_channels=2, out_channels=64, kernel_size=40, stride=2, padding=19, bias=False)# ol = 1024
+        self.bn1 = nn.BatchNorm1d(num_features=64)
+        self.c2 = nn.Conv1d(in_channels=64, out_channels=32, kernel_size=40, stride=4, padding=18, bias=False) # ol = 256
+        self.bn2 = nn.BatchNorm1d(num_features=32)
+        self.c3 = nn.Conv1d(in_channels=32, out_channels=16, kernel_size=40, stride=4, padding=18, bias=False) # ol = 64
+        self.bn3 = nn.BatchNorm1d(num_features=16)
+        self.fc = nn.Linear(in_features=1024, out_features=64, bias=False)
+        self.act = nn.LeakyReLU(negative_slope=negative_slope)
+    
+    def forward(self,x):
+        x = self.act(self.bn1(self.c1(x)))
+        x = self.act(self.bn2(self.c2(x)))
+        x = self.act(self.bn3(self.c3(x)))
+        return self.fc(torch.flatten(x, start_dim=1))
+
+class Decoder2(nn.Module):
+    def __init__(self, negative_slope: float = 0.2):
+        super().__init__()
+        self.fc = nn.Linear(in_features=64, out_features=512, bias = False)
+        self.bn0 = nn.BatchNorm1d(num_features=512)
+        self.ct1 = nn.ConvTranspose1d(in_channels=2, out_channels=32, kernel_size=40, stride=2, padding=19, bias=False) #ol = 512
+        self.bn1 = nn.BatchNorm1d(num_features=32)
+        self.ct2 = nn.ConvTranspose1d(in_channels=32, out_channels=32, kernel_size=40, stride=2, padding=19, bias=False) # ol = 1024
+        self.bn2 = nn.BatchNorm1d(num_features=32)
+        self.ct3 = nn.ConvTranspose1d(in_channels=32, out_channels=8, kernel_size=40, stride=2, padding=19, bias=False) #ol = 2048
+        self.bn3 = nn.BatchNorm1d(num_features=8)
+        self.ct4 = nn.Conv1d(in_channels=8, out_channels=2, kernel_size=7, stride=1, padding=3, bias=False)
+        self.act = nn.LeakyReLU(negative_slope=negative_slope)
+
+    def forward(self, x):
+        x = self.act(self.bn0(self.fc(x))).view(-1, 2, 256)
+        x = self.act(self.bn1(self.ct1(x)))
+        x = self.act(self.bn2(self.ct2(x)))
+        x = self.act(self.bn3(self.ct3(x)))
+        return self.ct4(x)
+
+
+class Autoencoder_CNN_2(nn.Module):
+    def __init__(self, negative_slope: float = 0.2):
+        super().__init__()
+        self.encoder = Encoder2(negative_slope=negative_slope)
+        self.decoder = Decoder2(negative_slope=negative_slope)
+    def forward(self,x):
+        return self.decoder(self.encoder(x))
