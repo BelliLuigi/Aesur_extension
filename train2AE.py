@@ -49,8 +49,8 @@ p_val_loader = DataLoader(p_val, batch_size=256, shuffle=False)
 p_test_loader = DataLoader(p_test, batch_size=256, shuffle=False)
 
 
-model1 = Autoencoder_CNN_1(negative_slope=0.1619).to(device) # amplitude
-model2 = Autoencoder_CNN_1(negative_slope=0.0859).to(device) #phase
+model1 = Autoencoder_CNN_1().to(device) # amplitude
+model2 = Autoencoder_CNN_1().to(device) #phase
 
 ## Loss function
 loss_fn1 = nn.L1Loss(reduction='mean')

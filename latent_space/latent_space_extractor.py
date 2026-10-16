@@ -20,8 +20,8 @@ if torch.cuda.is_available():
     print(f"Allocated GPU: {prop.name} | Compute Capability: {prop.major}.{prop.minor} | VRAM: {prop.total_memory / (1024**3):.1f} GB")
 
 # weight location paths
-model_a_weight = PROJECT_ROOT / 'model_weights/model1_ampl_20261015_113003_best.pt'
-model_p_weight = PROJECT_ROOT / 'model_weights/model2_phase_20261015_113003_best.pt'
+model_a_weight = PROJECT_ROOT / 'model_weights/model1_ampl_new.pt'
+model_p_weight = PROJECT_ROOT / 'model_weights/model2_phase_new.pt'
 
 ## dataset path
 condor_filepath = "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
@@ -81,8 +81,8 @@ with torch.no_grad():
     Z_phase = torch.cat(latent_phase_vectors, dim=0)
 
 out_dir = Path(__file__).resolve().parent
-np.save(out_dir / "Z_ampl.npy", Z_ampl.cpu().numpy())
-np.save(out_dir / "Z_phase.npy", Z_phase.cpu().numpy())
+np.save(out_dir / "Z_ampl_new.npy", Z_ampl.cpu().numpy())
+np.save(out_dir / "Z_phase_new.npy", Z_phase.cpu().numpy())
 
 
 
