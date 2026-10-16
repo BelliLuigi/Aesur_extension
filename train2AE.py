@@ -57,10 +57,10 @@ loss_fn1 = nn.L1Loss(reduction='mean')
 loss_fn2 = nn.L1Loss(reduction='mean')
 
 # Optimizer function
-opt_fn1 = Adam(model1.parameters(), lr=0.0068, weight_decay=1.4e-6)
-scheduler1 = lr_scheduler.ReduceLROnPlateau(opt_fn1, factor=0.2, patience=5, threshold=0.01, threshold_mode='rel')
-opt_fn2 = Adam(model2.parameters(), lr=0.0071, weight_decay=0.0098)
-scheduler2 = lr_scheduler.ReduceLROnPlateau(opt_fn2, factor=0.2, patience=6, threshold=0.01, threshold_mode='rel')
+opt_fn1 = Adam(model1.parameters(), lr=0.007, weight_decay=1e-9)
+scheduler1 = lr_scheduler.ReduceLROnPlateau(opt_fn1, factor=0.2, patience=50, threshold=0.01, threshold_mode='rel')
+opt_fn2 = Adam(model2.parameters(), lr=0.007, weight_decay=1e-9)
+scheduler2 = lr_scheduler.ReduceLROnPlateau(opt_fn2, factor=0.2, patience=50, threshold=0.01, threshold_mode='rel')
 
 
 def validate(model, val_loader, loss_fn):
@@ -80,7 +80,7 @@ def validate(model, val_loader, loss_fn):
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 writer1 = SummaryWriter(f"runs/AE_CNN_1_Amplitude_{timestamp}")
 writer2 = SummaryWriter(f"runs/AE_CNN_1_Phase_{timestamp}")
-EPOCHS = 3000
+EPOCHS = 1000
 best_vloss1 = float("inf")
 best_vloss2 = float("inf")
 

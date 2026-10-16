@@ -19,7 +19,8 @@ if torch.cuda.is_available():
     print(f"Allocated GPU: {prop.name} | Compute Capability: {prop.major}.{prop.minor} | VRAM: {prop.total_memory / (1024**3):.1f} GB")
 ## Load dataset from hdf
 
-filepath = "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
+filepath = "NRHybSur3dq8_dataset.hdf"
+condor_filepath = "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
 old_filepath = "nonhyb_noprec_dataset_q8.hdf"
 
 with h5py.File(filepath, "r") as f:
@@ -42,19 +43,19 @@ train, val, test = random_split(wf_tensor, [0.8,0.1,0.1], generator=torch.Genera
 
 
 # 1 dataloader for each one
-train_loader = DataLoader(train, batch_size = 128, shuffle= True)
+train_loader = DataLoader(train, batch_size = 64, shuffle= True)
 val_loader = DataLoader(val, batch_size=256, shuffle=False)
 test_loader = DataLoader(test, batch_size=256, shuffle=False)
 
 
-model = Autoencoder_CNN_2(negative_slope=0.1619).to(device) # amplitude
+model = Autoencoder_CNN_2(negative_slope=0.0277).to(device) # amplitude
 
 ## Loss function
 loss_fn = nn.L1Loss(reduction='mean')
 
 # Optimizer function
-opt_fn = Adam(model.parameters(), lr=0.0068, weight_decay=1.4e-6)
-scheduler = lr_scheduler.ReduceLROnPlateau(opt_fn, factor=0.2, patience=5, threshold=0.01, threshold_mode='rel')
+opt_fn = Adam(model.parameters(), lr=0.00508, weight_decay=1e-9)
+scheduler = lr_scheduler.ReduceLROnPlateau(opt_fn, factor=0.1, patience=50, threshold=0.01, threshold_mode='rel')
 
 
 def validate(model, val_loader, loss_fn):

@@ -9,7 +9,9 @@
     - With optuna looked for the best hyprparams for both (14/10 night)
     - training them on the kinda new dataset NRHybSur3dq8 on artemisa ( 15/10 morning-afternoon)
     - Prepared script to analyze the latent space representation of the two AEs. Waiting for training (15/10 afternoon).
-    - Consider do one single autoEncoder for both amplitude and phase (should come with benefits) (15/10 afternoon).
-    - Look for best hyprparams for Double architecture. (15 evening or 16 morning)
-    - Train the DOUBLE architecture on the first dataset too
+    - Written one single autoEncoder for both amplitude and phase (should come with benefits) (15/10 afternoon).
+    - Step back: the first two small AE (one for amplitude and one for Phase), didn't perform as i wished. In particular the phase autoencoder had very bad performance (like more than 1e-3 loss after 3000 epochs) and I think the reason is that i set weight decay very high. This hypothesis should be confirmed by the fact that weights on output layer to the latent space are veeery small (less than 1e-3) so I think that regularization here killed learning. Note for future self: optuna hyperparams suggestion need to be checked better.
+    - Look for best hyprparams for Double architecture. Done, will restart training on 16 afternoon bc eve here weight regularization could be too high.
+    - Train the DOUBLE architecture on the first dataset too. As above: train started on 16 afternoon.
+    - Train for the 2small architectures start on 16 afternoon too.
     - Start secondo phase of training on both approaches??? idk. let's see.

@@ -234,4 +234,8 @@ datasets/*
 *.ipynb
 *.pkl
 *.db
+*.csv
 
+# weights
+
+*.pt

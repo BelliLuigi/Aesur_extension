@@ -1,17 +1,17 @@
+import sys
+from pathlib import Path
+
+# Add project root to sys.path so models and utils can be imported
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.append(str(PROJECT_ROOT))
+
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
-from utils import get_phase
-from torch import Tensor
 from torch.utils.data import random_split
 import h5py
 import numpy as np
-from torch.optim import Adam, lr_scheduler
-from utils import train_one_epoch
-from torch.utils.tensorboard import SummaryWriter
 from models import Autoencoder_CNN_1
-from datetime import datetime
-import matplotlib.pyplot as plt
+from utils import get_phase
 
 ## device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -20,12 +20,13 @@ if torch.cuda.is_available():
     print(f"Allocated GPU: {prop.name} | Compute Capability: {prop.major}.{prop.minor} | VRAM: {prop.total_memory / (1024**3):.1f} GB")
 
 # weight location paths
-model_a_weight = 'path_ampl'
-model_p_weight = 'path_phas'
+model_a_weight = PROJECT_ROOT / 'model_weights/model1_ampl_20261015_113003_best.pt'
+model_p_weight = PROJECT_ROOT / 'model_weights/model2_phase_20261015_113003_best.pt'
 
 ## dataset path
-filepath = "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
+condor_filepath = "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
 ugly_filepath = "nonhyb_noprec_dataset_q8.hdf"
+filepath = PROJECT_ROOT / 'datasets/NRHybSur3dq8_dataset.hdf'
 
 
 # load models in device 
@@ -79,8 +80,9 @@ with torch.no_grad():
 
     Z_phase = torch.cat(latent_phase_vectors, dim=0)
 
-np.save("Z_ampl.npy", Z_ampl.cpu().numpy())
-np.save("Z_phase.npy", Z_phase.cpu().numpy())
+out_dir = Path(__file__).resolve().parent
+np.save(out_dir / "Z_ampl.npy", Z_ampl.cpu().numpy())
+np.save(out_dir / "Z_phase.npy", Z_phase.cpu().numpy())
 
 
 
