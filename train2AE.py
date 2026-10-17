@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from utils import get_phase
 from torch import Tensor
 from torch.utils.data import random_split
+import os
 import h5py
 import numpy as np
 from torch.optim import Adam, lr_scheduler
@@ -19,7 +20,8 @@ if torch.cuda.is_available():
     print(f"Allocated GPU: {prop.name} | Compute Capability: {prop.major}.{prop.minor} | VRAM: {prop.total_memory / (1024**3):.1f} GB")
 ## Load dataset from hdf
 
-filepath = "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
+filepath = "datasets/NRHybSur3dq8_dataset.hdf" if os.path.exists("datasets/NRHybSur3dq8_dataset.hdf") else "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
+condor_filepath = "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
 old_filepath = "nonhyb_noprec_dataset_q8.hdf"
 
 with h5py.File(filepath, "r") as f:
@@ -41,29 +43,30 @@ a_train, a_val, a_test = random_split(ampl_tensor, [0.8,0.1,0.1], generator=torc
 p_train, p_val, p_test = random_split(phase_tensor, [0.8,0.1,0.1], generator=torch.Generator().manual_seed(42))
 
 # 1 dataloader for each one
-a_train_loader = DataLoader(a_train, batch_size = 128, shuffle= True)
-a_val_loader = DataLoader(a_val, batch_size=256, shuffle=False)
-a_test_loader = DataLoader(a_test, batch_size=256, shuffle=False)
-p_train_loader = DataLoader(p_train, batch_size = 64, shuffle= True)
-p_val_loader = DataLoader(p_val, batch_size=256, shuffle=False)
-p_test_loader = DataLoader(p_test, batch_size=256, shuffle=False)
+a_train_loader = DataLoader(a_train, batch_size = 1024, shuffle= True)
+a_val_loader = DataLoader(a_val, batch_size=1024, shuffle=False)
+a_test_loader = DataLoader(a_test, batch_size=1024, shuffle=False)
+p_train_loader = DataLoader(p_train, batch_size = 1024, shuffle= True)
+p_val_loader = DataLoader(p_val, batch_size=1024, shuffle=False)
+p_test_loader = DataLoader(p_test, batch_size=1024, shuffle=False)
 
 
 model1 = Autoencoder_CNN_1().to(device) # amplitude
 model2 = Autoencoder_CNN_1().to(device) #phase
 
-## Loss function
+## Loss function & L2 latent regularization parameter
 loss_fn1 = nn.L1Loss(reduction='mean')
 loss_fn2 = nn.L1Loss(reduction='mean')
+lambda_latent = 1e-4
 
 # Optimizer function
 opt_fn1 = Adam(model1.parameters(), lr=0.007, weight_decay=1e-9)
-scheduler1 = lr_scheduler.ReduceLROnPlateau(opt_fn1, factor=0.2, patience=50, threshold=0.01, threshold_mode='rel')
+scheduler1 = lr_scheduler.ReduceLROnPlateau(opt_fn1, factor=0.2, patience=250, threshold=0.01, threshold_mode='rel')
 opt_fn2 = Adam(model2.parameters(), lr=0.007, weight_decay=1e-9)
-scheduler2 = lr_scheduler.ReduceLROnPlateau(opt_fn2, factor=0.2, patience=50, threshold=0.01, threshold_mode='rel')
+scheduler2 = lr_scheduler.ReduceLROnPlateau(opt_fn2, factor=0.2, patience=250, threshold=0.01, threshold_mode='rel')
 
 
-def validate(model, val_loader, loss_fn):
+def validate(model, val_loader, loss_fn, lambda_latent: float = 0.0):
     model.eval()
     running_vloss = 0.0
     with torch.no_grad():
@@ -71,8 +74,12 @@ def validate(model, val_loader, loss_fn):
             vinputs = vbatch.float().to(device)
             if vinputs.ndim == 2:
                 vinputs = vinputs.unsqueeze(1)
-            voutputs = model(vinputs)
-            vloss = loss_fn(voutputs, vinputs)
+            if lambda_latent > 0.0:
+                voutputs, z = model(vinputs, return_latent=True)
+                vloss = loss_fn(voutputs, vinputs) + lambda_latent * torch.mean(z ** 2)
+            else:
+                voutputs = model(vinputs)
+                vloss = loss_fn(voutputs, vinputs)
             running_vloss += vloss.item()
     return running_vloss / (i + 1)
 
@@ -87,13 +94,13 @@ best_vloss2 = float("inf")
 for epoch in range(EPOCHS):
     print(f"\nEPOCH {epoch + 1}:")
     print("  [Amplitude]")
-    avg_loss1 = train_one_epoch(model1, opt_fn1, loss_fn1, device, epoch, writer1, a_train_loader)
+    avg_loss1 = train_one_epoch(model1, opt_fn1, loss_fn1, device, epoch, writer1, a_train_loader, lambda_latent=lambda_latent)
     print("  [Phase]")
-    avg_loss2 = train_one_epoch(model2, opt_fn2, loss_fn2, device, epoch, writer2, p_train_loader)
+    avg_loss2 = train_one_epoch(model2, opt_fn2, loss_fn2, device, epoch, writer2, p_train_loader, lambda_latent=lambda_latent)
 
-    avg_vloss1 = validate(model1, a_val_loader, loss_fn1)
+    avg_vloss1 = validate(model1, a_val_loader, loss_fn1, lambda_latent=lambda_latent)
     scheduler1.step(avg_vloss1)
-    avg_vloss2 = validate(model2, p_val_loader, loss_fn2)
+    avg_vloss2 = validate(model2, p_val_loader, loss_fn2, lambda_latent=lambda_latent)
     scheduler2.step(avg_vloss2)
     if epoch % 100 == 99:
         print(f"  Amplitude | train: {avg_loss1:.6f} | valid: {avg_vloss1:.6f}")

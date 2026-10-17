@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 from utils import get_phase
 from torch import Tensor
 from torch.utils.data import random_split
+import os
 import h5py
 import numpy as np
 from torch.optim import Adam, lr_scheduler
@@ -19,7 +20,7 @@ if torch.cuda.is_available():
     print(f"Allocated GPU: {prop.name} | Compute Capability: {prop.major}.{prop.minor} | VRAM: {prop.total_memory / (1024**3):.1f} GB")
 ## Load dataset from hdf
 
-filepath = "NRHybSur3dq8_dataset.hdf"
+filepath = "datasets/NRHybSur3dq8_dataset.hdf" if os.path.exists("datasets/NRHybSur3dq8_dataset.hdf") else "NRHybSur3dq8_dataset.hdf"
 condor_filepath = "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
 old_filepath = "nonhyb_noprec_dataset_q8.hdf"
 
@@ -43,22 +44,23 @@ train, val, test = random_split(wf_tensor, [0.8,0.1,0.1], generator=torch.Genera
 
 
 # 1 dataloader for each one
-train_loader = DataLoader(train, batch_size = 64, shuffle= True)
-val_loader = DataLoader(val, batch_size=256, shuffle=False)
-test_loader = DataLoader(test, batch_size=256, shuffle=False)
+train_loader = DataLoader(train, batch_size = 1024, shuffle= True)
+val_loader = DataLoader(val, batch_size=1024, shuffle=False)
+test_loader = DataLoader(test, batch_size=1024, shuffle=False)
 
 
-model = Autoencoder_CNN_2(negative_slope=0.0277).to(device) # amplitude
+model = Autoencoder_CNN_2().to(device)
 
-## Loss function
+## Loss function & L2 latent regularization parameter
 loss_fn = nn.L1Loss(reduction='mean')
+lambda_latent = 1e-4
 
 # Optimizer function
 opt_fn = Adam(model.parameters(), lr=0.00508, weight_decay=1e-9)
-scheduler = lr_scheduler.ReduceLROnPlateau(opt_fn, factor=0.1, patience=50, threshold=0.01, threshold_mode='rel')
+scheduler = lr_scheduler.ReduceLROnPlateau(opt_fn, factor=0.1, patience=250, threshold=0.01, threshold_mode='rel')
 
 
-def validate(model, val_loader, loss_fn):
+def validate(model, val_loader, loss_fn, lambda_latent: float = 0.0):
     model.eval()
     running_vloss = 0.0
     with torch.no_grad():
@@ -66,8 +68,12 @@ def validate(model, val_loader, loss_fn):
             vinputs = vbatch.float().to(device)
             if vinputs.ndim == 2:
                 vinputs = vinputs.unsqueeze(1)
-            voutputs = model(vinputs)
-            vloss = loss_fn(voutputs, vinputs)
+            if lambda_latent > 0.0:
+                voutputs, z = model(vinputs, return_latent=True)
+                vloss = loss_fn(voutputs, vinputs) + lambda_latent * torch.mean(z ** 2)
+            else:
+                voutputs = model(vinputs)
+                vloss = loss_fn(voutputs, vinputs)
             running_vloss += vloss.item()
     return running_vloss / (i + 1)
 
@@ -79,9 +85,9 @@ best_vloss = float("inf")
 
 for epoch in range(EPOCHS):
     print(f"\nEPOCH {epoch + 1}:")
-    avg_loss = train_one_epoch(model, opt_fn, loss_fn, device, epoch, writer, train_loader)
+    avg_loss = train_one_epoch(model, opt_fn, loss_fn, device, epoch, writer, train_loader, lambda_latent=lambda_latent)
     
-    avg_vloss = validate(model, val_loader, loss_fn)
+    avg_vloss = validate(model, val_loader, loss_fn, lambda_latent=lambda_latent)
     scheduler.step(avg_vloss)
     if epoch % 100 == 99:
         print(f"  DoubleAE | train: {avg_loss:.6f} | valid: {avg_vloss:.6f}")
