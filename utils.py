@@ -132,3 +132,19 @@ def train_one_epoch(model, optimizer, loss_fn, device, epoch_index, tb_writer, l
             running_loss = 0.0
 
     return last_loss
+
+
+
+class L1WeightLoss(nn.Module):
+    def __init__(self, w:float = 5.0, start_window:int = 1700, end_window:int = 2048):
+        super().__init__()
+        self.w = w
+        self.start_window = start_window
+        self.end_window = end_window
+        weights = torch.ones(1,1,self.end_window)
+        weights[:,:, self.start_window:self.end_window] = torch.linspace(1.0, self.w, self.end_window - self.start_window)
+        weights = weights/weights.mean()
+        self.register_buffer("weights", weights)
+        
+    def forward(self, inputs, outputs):
+        return torch.mean(self.weights * torch.abs(inputs - outputs))

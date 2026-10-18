@@ -8,7 +8,7 @@ import os
 import h5py
 import numpy as np
 from torch.optim import Adam, lr_scheduler
-from utils import train_one_epoch
+from utils import train_one_epoch, L1WeightLoss
 from torch.utils.tensorboard import SummaryWriter
 from models import Autoencoder_CNN_2
 from datetime import datetime
@@ -44,20 +44,20 @@ train, val, test = random_split(wf_tensor, [0.8,0.1,0.1], generator=torch.Genera
 
 
 # 1 dataloader for each one
-train_loader = DataLoader(train, batch_size = 1024, shuffle= True)
-val_loader = DataLoader(val, batch_size=1024, shuffle=False)
+train_loader = DataLoader(train, batch_size = 64, shuffle= True)
+val_loader = DataLoader(val, batch_size=2048, shuffle=False)
 test_loader = DataLoader(test, batch_size=1024, shuffle=False)
 
 
 model = Autoencoder_CNN_2().to(device)
 
 ## Loss function & L2 latent regularization parameter
-loss_fn = nn.L1Loss(reduction='mean')
-lambda_latent = 1e-4
+loss_fn = L1WeightLoss().to(device)
+lambda_latent = 1e-5
 
 # Optimizer function
-opt_fn = Adam(model.parameters(), lr=0.00508, weight_decay=1e-9)
-scheduler = lr_scheduler.ReduceLROnPlateau(opt_fn, factor=0.1, patience=250, threshold=0.01, threshold_mode='rel')
+opt_fn = Adam(model.parameters(), lr=7e-3, weight_decay=1e-9)
+scheduler = lr_scheduler.ReduceLROnPlateau(opt_fn, factor=0.5, patience=100, threshold=0.0001, threshold_mode='rel', min_lr=1e-6)
 
 
 def validate(model, val_loader, loss_fn, lambda_latent: float = 0.0):

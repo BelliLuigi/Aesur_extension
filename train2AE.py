@@ -8,7 +8,7 @@ import os
 import h5py
 import numpy as np
 from torch.optim import Adam, lr_scheduler
-from utils import train_one_epoch
+from utils import train_one_epoch, L1WeightLoss
 from torch.utils.tensorboard import SummaryWriter
 from models import Autoencoder_CNN_1
 from datetime import datetime
@@ -43,11 +43,11 @@ a_train, a_val, a_test = random_split(ampl_tensor, [0.8,0.1,0.1], generator=torc
 p_train, p_val, p_test = random_split(phase_tensor, [0.8,0.1,0.1], generator=torch.Generator().manual_seed(42))
 
 # 1 dataloader for each one
-a_train_loader = DataLoader(a_train, batch_size = 1024, shuffle= True)
-a_val_loader = DataLoader(a_val, batch_size=1024, shuffle=False)
+a_train_loader = DataLoader(a_train, batch_size = 64, shuffle= True)
+a_val_loader = DataLoader(a_val, batch_size=2048, shuffle=False)
 a_test_loader = DataLoader(a_test, batch_size=1024, shuffle=False)
-p_train_loader = DataLoader(p_train, batch_size = 1024, shuffle= True)
-p_val_loader = DataLoader(p_val, batch_size=1024, shuffle=False)
+p_train_loader = DataLoader(p_train, batch_size = 64, shuffle= True)
+p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 p_test_loader = DataLoader(p_test, batch_size=1024, shuffle=False)
 
 
@@ -56,14 +56,14 @@ model2 = Autoencoder_CNN_1().to(device) #phase
 
 ## Loss function & L2 latent regularization parameter
 loss_fn1 = nn.L1Loss(reduction='mean')
-loss_fn2 = nn.L1Loss(reduction='mean')
-lambda_latent = 1e-4
+loss_fn2 = L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
+lambda_latent = 1e-5
 
 # Optimizer function
-opt_fn1 = Adam(model1.parameters(), lr=0.007, weight_decay=1e-9)
-scheduler1 = lr_scheduler.ReduceLROnPlateau(opt_fn1, factor=0.2, patience=250, threshold=0.01, threshold_mode='rel')
-opt_fn2 = Adam(model2.parameters(), lr=0.007, weight_decay=1e-9)
-scheduler2 = lr_scheduler.ReduceLROnPlateau(opt_fn2, factor=0.2, patience=250, threshold=0.01, threshold_mode='rel')
+opt_fn1 = Adam(model1.parameters(), lr=7e-3, weight_decay=1e-9)
+scheduler1 = lr_scheduler.ReduceLROnPlateau(opt_fn1, factor=0.5, patience=100, threshold=0.0001, threshold_mode='rel', min_lr=1e-6)
+opt_fn2 = Adam(model2.parameters(), lr=7e-3, weight_decay=1e-9)
+scheduler2 = lr_scheduler.ReduceLROnPlateau(opt_fn2, factor=0.5, patience=100, threshold=0.0001, threshold_mode='rel', min_lr=1e-6)
 
 
 def validate(model, val_loader, loss_fn, lambda_latent: float = 0.0):
@@ -87,7 +87,7 @@ def validate(model, val_loader, loss_fn, lambda_latent: float = 0.0):
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 writer1 = SummaryWriter(f"runs/AE_CNN_1_Amplitude_{timestamp}")
 writer2 = SummaryWriter(f"runs/AE_CNN_1_Phase_{timestamp}")
-EPOCHS = 1000
+EPOCHS = 3000
 best_vloss1 = float("inf")
 best_vloss2 = float("inf")
 
