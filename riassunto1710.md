@@ -59,6 +59,13 @@ Creazione di modelli surrogati veloci e compatti basati su **Autoencoder Convolu
 - Chiarito che `patience` conta le epoche perché `scheduler.step(vloss)` viene chiamato a fine epoca.
 - Configurazione calibrata: `factor=0.5`, `patience=75-100`, `threshold=0.0001`, `min_lr=1e-6` per evitare drop prematuri che congelavano il modello.
 
+### Fase 6: Implementazione della Time-Weighted Loss Continua (18 Ottobre)
+- **Classe `L1WeightLoss(nn.Module)` in `utils.py`**: progettata per forzare la convergenza sulla fase finale dell'onda senza rompere la continuità del gradiente.
+- **Rampa continua contro lo scalino netto**: per evitare artefatti da gradino a indice 1700, i pesi seguono una crescita lineare continua (`torch.linspace(1.0, 5.0, 348)`) dai campioni 1700 a 2048.
+- **Invarianza del Learning Rate**: normalizzazione automatica `weights = weights / weights.mean()`, mantenendo inalterata la scala globale della loss e dei gradienti.
+- **Efficienza computazionale**: tensore `weights` registrato come buffer GPU (`register_buffer`) con shape broadcastabile `(1, 1, 2048)` (zero allocazioni di memoria per batch durante il loop).
+- **Integrazione attiva**: assegnata a `loss_fn2` in `train2AE.py` (fase) e a `loss_fn` in `train_doubleAE.py`.
+
 ---
 
 ## 3. Tutti i Test Condotti e Risultati Numerici
@@ -136,6 +143,5 @@ Misura del rapporto tra autovalore massimo e minimo del gradiente:
 
 1. **Abbandonare l'architettura congiunta a 2 canali**: concentrare la computazione sui modelli a canale singolo (`Autoencoder_CNN_1`), nettamente superiori.
 2. **Colmare il gap della fase ($6.28 \times 10^{-4} \to 10^{-5}$)**:
-   - Poiché l'errore della fase è concentrato al merger ($1.15 \times 10^{-3}$ vs $5.56 \times 10^{-4}$), implementare una **Time-Weighted Loss**:
-     $$\mathcal{L}_{\text{weighted}} = \frac{1}{T} \sum_{t=1}^{T} w(t) |\hat{\phi}(t) - \phi(t)| \quad \text{con } w(t) \in [1, 5] \text{ negli ultimi 200 campioni}$$
+   - **Completato e attivo**: implementata la `L1WeightLoss` con rampa continua ($1.0 \to 5.0$) per concentrare i gradienti sugli ultimi campioni del merger ($1.15 \times 10^{-3} \to 10^{-5}$) preservando la scala del learning rate.
 3. **Mantenere `ReduceLROnPlateau` Calibrato**: Utilizzare la configurazione testata (`factor=0.5`, `patience=75-100`, `threshold=1e-4`, `min_lr=1e-6`) che evita i drop prematuri a $10^{-6}$ e si adatta alla convergenza effettiva.
