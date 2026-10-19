@@ -90,8 +90,8 @@ lambda_latent = 1e-5
 # Optimizers & Schedulers
 # ---------------------------------------------------------------------------
 if args.opt.lower() == "soap":
-    opt_fn_amplitude = opt_add.SOAP(model_amplitude.parameters(), lr=5e-3, betas=(0.95,0.999), shampoo_beta=0.99, weight_decay=1e-9, precondition_frequency=25, merge_dims=True, eps=0.0001)
-    opt_fn_phase = opt_add.SOAP(model_phase.parameters(), lr=5e-3, betas=(0.95,0.999), shampoo_beta=0.99, weight_decay=1e-9, precondition_frequency=25, merge_dims=True, eps=0.0001)
+    opt_fn_amplitude = opt_add.SOAP(model_amplitude.parameters(), lr=5e-3, betas=(0.95,0.999), shampoo_beta=0.99, weight_decay=1e-9, precondition_frequency=25, merge_dims=False, eps=0.0001)
+    opt_fn_phase = opt_add.SOAP(model_phase.parameters(), lr=5e-3, betas=(0.95,0.999), shampoo_beta=0.99, weight_decay=1e-9, precondition_frequency=25, merge_dims=False, eps=0.0001)
 else:
     opt_fn_amplitude = AdamW(model_amplitude.parameters(), lr=7e-3, weight_decay=1e-9)
     opt_fn_phase = AdamW(model_phase.parameters(), lr=7e-3, weight_decay=1e-9)
