@@ -1,28 +1,54 @@
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from utils import get_phase
-from torch import Tensor
-from torch.utils.data import random_split
+import argparse
 import os
+from datetime import datetime
 import h5py
 import numpy as np
-from torch.optim import Adam, lr_scheduler
-from utils import train_one_epoch, L1WeightLoss
-from torch.utils.tensorboard import SummaryWriter
+import pandas as pd
+import matplotlib.pyplot as plt
+import torch
+import torch.nn as nn
+from torch.optim import AdamW, lr_scheduler
+from torch.utils.data import DataLoader, random_split
+import pytorch_optimizer as opt_add
+
 from models import Autoencoder_CNN_1
-from datetime import datetime
+from utils import get_phase, train_one_epoch, L1WeightLoss, validate, plot_training_curves, plot_training
 
 
+# ---------------------------------------------------------------------------
+# CLI Arguments
+# ---------------------------------------------------------------------------
+parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Phase (NRHybSur3dq8)")
+parser.add_argument("--title", type=str, default=None, help="Title / prefix for this run (used in output filenames)")
+parser.add_argument("--opt", type=str, choices=["adam", "soap"], default="adam", help="Optimizer choice: 'adam' or 'soap' (default: adam)")
+parser.add_argument("--epochs", type=int, default=3000, help="Number of training epochs (default: 3000)")
+args = parser.parse_args()
+
+title = args.title
+if not title:
+    try:
+        title = input("Enter title of this run: ").strip()
+    except EOFError:
+        title = ""
+    if not title:
+        title = f"AE_{args.opt}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+print(f"=== Starting Run: {title} | Optimizer: {args.opt.upper()} | Epochs: {args.epochs} ===")
+
+# ---------------------------------------------------------------------------
+# Device Configuration
+# ---------------------------------------------------------------------------
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if torch.cuda.is_available():
     prop = torch.cuda.get_device_properties(device)
     print(f"Allocated GPU: {prop.name} | Compute Capability: {prop.major}.{prop.minor} | VRAM: {prop.total_memory / (1024**3):.1f} GB")
-## Load dataset from hdf
+else:
+    print("Using CPU device.")
 
+# ---------------------------------------------------------------------------
+# Load Dataset from HDF5
+# ---------------------------------------------------------------------------
 filepath = "datasets/NRHybSur3dq8_dataset.hdf" if os.path.exists("datasets/NRHybSur3dq8_dataset.hdf") else "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
-condor_filepath = "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
-old_filepath = "nonhyb_noprec_dataset_q8.hdf"
 
 with h5py.File(filepath, "r") as f:
     waveforms_ds = f["Waveforms"]
@@ -34,99 +60,170 @@ with h5py.File(filepath, "r") as f:
         end = min(start + chunk_size, n_samples)
         amplitude[start:end] = np.abs(waveforms_ds[start:end]).astype(np.float32)
         phase[start:end] = get_phase(waveforms_ds[start:end]).astype(np.float32)
-        
+
 ampl_tensor = torch.from_numpy(amplitude)
 phase_tensor = torch.from_numpy(phase)
 
-# split in test, train and validation for both
-a_train, a_val, a_test = random_split(ampl_tensor, [0.8,0.1,0.1], generator=torch.Generator().manual_seed(42))
-p_train, p_val, p_test = random_split(phase_tensor, [0.8,0.1,0.1], generator=torch.Generator().manual_seed(42))
+# Split train/val/test
+a_train, a_val, a_test = random_split(ampl_tensor, [0.8, 0.1, 0.1], generator=torch.Generator().manual_seed(42))
+p_train, p_val, p_test = random_split(phase_tensor, [0.8, 0.1, 0.1], generator=torch.Generator().manual_seed(42))
 
-# 1 dataloader for each one
-a_train_loader = DataLoader(a_train, batch_size = 64, shuffle= True)
+a_train_loader = DataLoader(a_train, batch_size=64, shuffle=True)
 a_val_loader = DataLoader(a_val, batch_size=2048, shuffle=False)
 a_test_loader = DataLoader(a_test, batch_size=1024, shuffle=False)
-p_train_loader = DataLoader(p_train, batch_size = 64, shuffle= True)
+
+p_train_loader = DataLoader(p_train, batch_size=64, shuffle=True)
 p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 p_test_loader = DataLoader(p_test, batch_size=1024, shuffle=False)
 
+# ---------------------------------------------------------------------------
+# Models, Loss Functions & Regularization
+# ---------------------------------------------------------------------------
+model_amplitude = Autoencoder_CNN_1().to(device)
+model_phase = Autoencoder_CNN_1().to(device)
 
-model1 = Autoencoder_CNN_1().to(device) # amplitude
-model2 = Autoencoder_CNN_1().to(device) #phase
-
-## Loss function & L2 latent regularization parameter
-loss_fn1 = nn.L1Loss(reduction='mean')
-loss_fn2 = L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
+loss_fn_amplitude = L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
+loss_fn_phase = L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
 lambda_latent = 1e-5
 
-# Optimizer function
-opt_fn1 = Adam(model1.parameters(), lr=7e-3, weight_decay=1e-9)
-scheduler1 = lr_scheduler.ReduceLROnPlateau(opt_fn1, factor=0.5, patience=100, threshold=0.0001, threshold_mode='rel', min_lr=1e-6)
-opt_fn2 = Adam(model2.parameters(), lr=7e-3, weight_decay=1e-9)
-scheduler2 = lr_scheduler.ReduceLROnPlateau(opt_fn2, factor=0.5, patience=100, threshold=0.0001, threshold_mode='rel', min_lr=1e-6)
+# ---------------------------------------------------------------------------
+# Optimizers & Schedulers
+# ---------------------------------------------------------------------------
+if args.opt.lower() == "soap":
+    opt_fn_amplitude = opt_add.SOAP(model_amplitude.parameters(), lr=5e-3, betas=(0.95,0.999), shampoo_beta=0.99, weight_decay=1e-9, precondition_frequency=25, merge_dims=True, eps=0.0001)
+    opt_fn_phase = opt_add.SOAP(model_phase.parameters(), lr=5e-3, betas=(0.95,0.999), shampoo_beta=0.99, weight_decay=1e-9, precondition_frequency=25, merge_dims=True, eps=0.0001)
+else:
+    opt_fn_amplitude = AdamW(model_amplitude.parameters(), lr=7e-3, weight_decay=1e-9)
+    opt_fn_phase = AdamW(model_phase.parameters(), lr=7e-3, weight_decay=1e-9)
+
+scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
+    opt_fn_amplitude, factor=0.5, patience=200, threshold=0.0001, threshold_mode="rel", min_lr=1e-6, cooldown=50
+)
+scheduler_phase = lr_scheduler.ReduceLROnPlateau(
+    opt_fn_phase, factor=0.5, patience=200, threshold=0.0001, threshold_mode="rel", min_lr=1e-6, cooldown=50
+)
 
 
-def validate(model, val_loader, loss_fn, lambda_latent: float = 0.0):
-    model.eval()
-    running_vloss = 0.0
-    with torch.no_grad():
-        for i, vbatch in enumerate(val_loader):
-            vinputs = vbatch.float().to(device)
-            if vinputs.ndim == 2:
-                vinputs = vinputs.unsqueeze(1)
-            if lambda_latent > 0.0:
-                voutputs, z = model(vinputs, return_latent=True)
-                vloss = loss_fn(voutputs, vinputs) + lambda_latent * torch.mean(z ** 2)
-            else:
-                voutputs = model(vinputs)
-                vloss = loss_fn(voutputs, vinputs)
-            running_vloss += vloss.item()
-    return running_vloss / (i + 1)
+# ---------------------------------------------------------------------------
+# Training Loop
+# ---------------------------------------------------------------------------
+best_vloss_amplitude = float("inf")
+best_vloss_phase = float("inf")
 
+history = {
+    "epoch": [],
+    "train_loss_amplitude": [],
+    "val_loss_amplitude": [],
+    "lr_amplitude": [],
+    "train_loss_phase": [],
+    "val_loss_phase": [],
+    "lr_phase": [],
+}
 
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-writer1 = SummaryWriter(f"runs/AE_CNN_1_Amplitude_{timestamp}")
-writer2 = SummaryWriter(f"runs/AE_CNN_1_Phase_{timestamp}")
-EPOCHS = 3000
-best_vloss1 = float("inf")
-best_vloss2 = float("inf")
+print(f"Starting training for {args.epochs} epochs...")
 
-for epoch in range(EPOCHS):
-    print(f"\nEPOCH {epoch + 1}:")
-    print("  [Amplitude]")
-    avg_loss1 = train_one_epoch(model1, opt_fn1, loss_fn1, device, epoch, writer1, a_train_loader, lambda_latent=lambda_latent)
-    print("  [Phase]")
-    avg_loss2 = train_one_epoch(model2, opt_fn2, loss_fn2, device, epoch, writer2, p_train_loader, lambda_latent=lambda_latent)
-
-    avg_vloss1 = validate(model1, a_val_loader, loss_fn1, lambda_latent=lambda_latent)
-    scheduler1.step(avg_vloss1)
-    avg_vloss2 = validate(model2, p_val_loader, loss_fn2, lambda_latent=lambda_latent)
-    scheduler2.step(avg_vloss2)
-    if epoch % 100 == 99:
-        print(f"  Amplitude | train: {avg_loss1:.6f} | valid: {avg_vloss1:.6f}")
-        print(f"  Phase     | train: {avg_loss2:.6f} | valid: {avg_vloss2:.6f}")
-    current_lr1 = scheduler1.get_last_lr()[0]
-    current_lr2 = scheduler2.get_last_lr()[0]
-
-    writer1.add_scalars(
-        "Training and Validation Loss",
-        {"Training": avg_loss1, "Validation": avg_vloss1, "lr": current_lr1},
-        epoch + 1,
+for epoch in range(args.epochs):
+    # Train epoch (passing None to disable tensorboard SummaryWriter)
+    avg_loss_ampl = train_one_epoch(
+        model_amplitude, opt_fn_amplitude, loss_fn_amplitude, device, epoch, None, a_train_loader, lambda_latent=lambda_latent
     )
-    writer1.flush()
-
-    writer2.add_scalars(
-        "Training and Validation Loss",
-        {"Training": avg_loss2, "Validation": avg_vloss2, "lr": current_lr2},
-        epoch + 1,
+    avg_loss_ph = train_one_epoch(
+        model_phase, opt_fn_phase, loss_fn_phase, device, epoch, None, p_train_loader, lambda_latent=lambda_latent
     )
-    writer2.flush()
 
-    if avg_vloss1 < best_vloss1:
-        best_vloss1 = avg_vloss1
-        torch.save(model1.state_dict(), f"model1_ampl_{timestamp}_best.pt")
+    # Validate
+    avg_vloss_ampl = validate(model_amplitude, a_val_loader, loss_fn_amplitude, lambda_latent=lambda_latent)
+    scheduler_amplitude.step(avg_vloss_ampl)
 
-    if avg_vloss2 < best_vloss2:
-        best_vloss2 = avg_vloss2
-        torch.save(model2.state_dict(), f"model2_phase_{timestamp}_best.pt")
+    avg_vloss_ph = validate(model_phase, p_val_loader, loss_fn_phase, lambda_latent=lambda_latent)
+    scheduler_phase.step(avg_vloss_ph)
 
+    current_lr_ampl = scheduler_amplitude.get_last_lr()[0]
+    current_lr_ph = scheduler_phase.get_last_lr()[0]
+
+    # Record history
+    history["epoch"].append(epoch + 1)
+    history["train_loss_amplitude"].append(avg_loss_ampl)
+    history["val_loss_amplitude"].append(avg_vloss_ampl)
+    history["lr_amplitude"].append(current_lr_ampl)
+    history["train_loss_phase"].append(avg_loss_ph)
+    history["val_loss_phase"].append(avg_vloss_ph)
+    history["lr_phase"].append(current_lr_ph)
+
+    # Save best Amplitude model & optimizer state
+    if avg_vloss_ampl < best_vloss_amplitude:
+        best_vloss_amplitude = avg_vloss_ampl
+        torch.save(model_amplitude.state_dict(), f"{title}_amplitude_best.pt")
+        torch.save(
+            {
+                "epoch": epoch + 1,
+                "model_state_dict": model_amplitude.state_dict(),
+                "optimizer_state_dict": opt_fn_amplitude.state_dict(),
+                "scheduler_state_dict": scheduler_amplitude.state_dict(),
+                "best_vloss": best_vloss_amplitude,
+            },
+            f"{title}_amplitude_checkpoint.pt",
+        )
+
+    # Save best Phase model & optimizer state
+    if avg_vloss_ph < best_vloss_phase:
+        best_vloss_phase = avg_vloss_ph
+        torch.save(model_phase.state_dict(), f"{title}_phase_best.pt")
+        torch.save(
+            {
+                "epoch": epoch + 1,
+                "model_state_dict": model_phase.state_dict(),
+                "optimizer_state_dict": opt_fn_phase.state_dict(),
+                "scheduler_state_dict": scheduler_phase.state_dict(),
+                "best_vloss": best_vloss_phase,
+            },
+            f"{title}_phase_checkpoint.pt",
+        )
+
+    if (epoch + 1) % 10 == 0 or epoch == 0 or (epoch + 1) == args.epochs:
+        print(f"Epoch [{epoch + 1}/{args.epochs}]")
+        print(f"  Amplitude | Train Loss: {avg_loss_ampl:.6f} | Val Loss: {avg_vloss_ampl:.6f} | Best: {best_vloss_amplitude:.6f} | LR: {current_lr_ampl:.2e}")
+        print(f"  Phase     | Train Loss: {avg_loss_ph:.6f} | Val Loss: {avg_vloss_ph:.6f} | Best: {best_vloss_phase:.6f} | LR: {current_lr_ph:.2e}")
+
+# ---------------------------------------------------------------------------
+# Save 1 Unified CSV History
+# ---------------------------------------------------------------------------
+csv_filename = f"{title}_metrics.csv"
+df_history = pd.DataFrame(history)
+df_history.to_csv(csv_filename, index=False)
+print(f"\nUnified metrics CSV saved: {csv_filename}")
+
+# ---------------------------------------------------------------------------
+# Generate Professional Plots (Log Scale, Red/Blue/Black, Min Val Tagged)
+# ---------------------------------------------------------------------------
+plot_ampl_filename = f"{title}_amplitude_plot.png"
+plot_training_curves(
+    epochs=history["epoch"],
+    train_losses=history["train_loss_amplitude"],
+    val_losses=history["val_loss_amplitude"],
+    lrs=history["lr_amplitude"],
+    run_title=title,
+    metric_name="Amplitude",
+    output_path=plot_ampl_filename,
+)
+
+plot_phase_filename = f"{title}_phase_plot.png"
+plot_training_curves(
+    epochs=history["epoch"],
+    train_losses=history["train_loss_phase"],
+    val_losses=history["val_loss_phase"],
+    lrs=history["lr_phase"],
+    run_title=title,
+    metric_name="Phase",
+    output_path=plot_phase_filename,
+)
+
+print(f"\nTraining completed successfully for run '{title}'.")
+print(f"Saved artifacts:")
+print(f"  - Best Amplitude Model:      {title}_amplitude_best.pt")
+print(f"  - Amplitude Full Checkpoint: {title}_amplitude_checkpoint.pt (includes optimizer state)")
+print(f"  - Best Phase Model:          {title}_phase_best.pt")
+print(f"  - Phase Full Checkpoint:     {title}_phase_checkpoint.pt (includes optimizer state)")
+print(f"  - History CSV:               {csv_filename}")
+print(f"  - Amplitude Plot:            {plot_ampl_filename}")
+print(f"  - Phase Plot:                {plot_phase_filename}")

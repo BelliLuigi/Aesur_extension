@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import matplotlib.pyplot as plt
 
 
 def get_phase(dataset):
@@ -148,3 +149,72 @@ class L1WeightLoss(nn.Module):
         
     def forward(self, inputs, outputs):
         return torch.mean(self.weights * torch.abs(inputs - outputs))
+
+
+def validate(model, val_loader, loss_fn, device=None, lambda_latent: float = 0.0):
+    if device is None:
+        device = next(model.parameters()).device
+    model.eval()
+    running_vloss = 0.0
+    with torch.no_grad():
+        for i, vbatch in enumerate(val_loader):
+            vinputs = vbatch.float().to(device)
+            if vinputs.ndim == 2:
+                vinputs = vinputs.unsqueeze(1)
+            if lambda_latent > 0.0:
+                voutputs, z = model(vinputs, return_latent=True)
+                vloss = loss_fn(voutputs, vinputs) + lambda_latent * torch.mean(z**2)
+            else:
+                voutputs = model(vinputs)
+                vloss = loss_fn(voutputs, vinputs)
+            running_vloss += vloss.item()
+    return running_vloss / (i + 1)
+
+
+def plot_training_curves(epochs, train_losses, val_losses, lrs, run_title, metric_name, output_path):
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=300)
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
+
+    # Curves: Blue (Train), Red (Validation), Black (Learning Rate)
+    ax.plot(epochs, train_losses, label="Train Loss", color="blue", linewidth=1.8)
+    ax.plot(epochs, val_losses, label="Validation Loss", color="red", linewidth=1.8)
+    ax.plot(epochs, lrs, label="Learning Rate", color="black", linewidth=1.4, linestyle="--")
+
+    # Logarithmic y-scale
+    ax.set_yscale("log")
+
+    # Minimum validation loss marker and horizontal line
+    min_vloss_idx = int(np.argmin(val_losses))
+    min_vloss = val_losses[min_vloss_idx]
+    best_epoch = epochs[min_vloss_idx]
+
+    ax.axhline(y=min_vloss, color="red", linestyle=":", linewidth=1.5, alpha=0.85)
+    ax.scatter([best_epoch], [min_vloss], color="red", s=55, zorder=5)
+
+    # Offset tag annotation
+    offset_y = min_vloss * 1.6 if min_vloss * 1.6 < max(val_losses) else min_vloss * 0.7
+    ax.annotate(
+        f"Min Val Loss: {min_vloss:.6e}\n(Epoch {best_epoch})",
+        xy=(best_epoch, min_vloss),
+        xytext=(best_epoch, offset_y),
+        arrowprops=dict(facecolor="black", shrink=0.08, width=1, headwidth=5),
+        bbox=dict(boxstyle="round,pad=0.35", edgecolor="red", facecolor="#fff5f5", alpha=0.95),
+        fontsize=9,
+        fontweight="bold",
+    )
+
+    ax.set_title(f"{run_title} - {metric_name} Training Curves", fontsize=13, fontweight="bold", pad=12)
+    ax.set_xlabel("Epoch", fontsize=11, fontweight="semibold")
+    ax.set_ylabel("Loss / Learning Rate (Log Scale)", fontsize=11, fontweight="semibold")
+    ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.45)
+    ax.legend(frameon=True, facecolor="#ffffff", edgecolor="#cccccc", fontsize=10, loc="upper right")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+    print(f"Plot saved: {output_path}")
+
+
+# Alias
+plot_training = plot_training_curves

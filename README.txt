@@ -15,3 +15,6 @@
     - Train the DOUBLE architecture on the first dataset too. As above: train started on 16 afternoon.
     - Train for the 2small architectures start on 16 afternoon too.
     - Start secondo phase of training on both approaches??? idk. let's see.
+
+    - 18-19/10: re-did the architecture of AE, better and a little bigger, now will try adam VS soap,
+    - 20/10 : try mismatch loss smth

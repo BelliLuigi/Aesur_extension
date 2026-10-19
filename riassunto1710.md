@@ -1,4 +1,4 @@
-# Riassunto Completo del Progetto Aesur_ext (13 - 18 Ottobre 2026)
+# Riassunto Completo del Progetto Aesur_ext (13 - 19 Ottobre 2026)
 
 Documento di sintesi dettagliata delle attività, modelli sviluppati, test empirici condotti, risultati numerici verificati su test set e analisi matematiche dello spazio latente.
 
@@ -66,6 +66,136 @@ Creazione di modelli surrogati veloci e compatti basati su **Autoencoder Convolu
 - **Efficienza computazionale**: tensore `weights` registrato come buffer GPU (`register_buffer`) con shape broadcastabile `(1, 1, 2048)` (zero allocazioni di memoria per batch durante il loop).
 - **Integrazione attiva**: assegnata a `loss_fn2` in `train2AE.py` (fase) e a `loss_fn` in `train_doubleAE.py`.
 
+### Fase 7: Nuova Architettura Speculare, Ottimizzatore SOAP, Training Unificato e Mismatch (19 Ottobre)
+
+#### 1. Riprogettazione Architetturale (`models.py`): Vecchia vs Nuova
+
+##### A. Vecchia Architettura (Asimmetrica - 129.336 parametri)
+```python
+class Encoder1(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.c1 = nn.Conv1d(1, 32, kernel_size=40, stride=2, padding=19, bias=False)  # 2048 -> 1024
+        self.bn1 = nn.BatchNorm1d(32)
+        self.c2 = nn.Conv1d(32, 16, kernel_size=40, stride=4, padding=18, bias=False) # 1024 -> 256
+        self.bn2 = nn.BatchNorm1d(16)
+        self.c3 = nn.Conv1d(16, 8, kernel_size=40, stride=4, padding=18, bias=False)  # 256 -> 64
+        self.bn3 = nn.BatchNorm1d(8)
+        self.fc = nn.Linear(512, 64, bias=False)
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        x = self.act(self.bn1(self.c1(x)))
+        x = self.act(self.bn2(self.c2(x)))
+        x = self.act(self.bn3(self.c3(x)))
+        return self.fc(torch.flatten(x, start_dim=1))
+
+class Decoder1(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(64, 256, bias=False)
+        self.bn0 = nn.BatchNorm1d(256)
+        self.ct1 = nn.ConvTranspose1d(1, 32, kernel_size=40, stride=2, padding=19, bias=False)  # 256 -> 512
+        self.bn1 = nn.BatchNorm1d(32)
+        self.ct2 = nn.ConvTranspose1d(32, 32, kernel_size=40, stride=2, padding=19, bias=False) # 512 -> 1024
+        self.bn2 = nn.BatchNorm1d(32)
+        self.ct3 = nn.ConvTranspose1d(32, 8, kernel_size=40, stride=2, padding=19, bias=False)  # 1024 -> 2048
+        self.bn3 = nn.BatchNorm1d(8)
+        self.ct4 = nn.Conv1d(8, 1, kernel_size=7, stride=1, padding=3, bias=False)
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        x = self.act(self.bn0(self.fc(x)))
+        x = x.unsqueeze(1)
+        x = self.act(self.bn1(self.ct1(x)))
+        x = self.act(self.bn2(self.ct2(x)))
+        x = self.act(self.bn3(self.ct3(x)))
+        return self.ct4(x)
+```
+
+##### B. Nuova Architettura (Speculare a Piramide - 291.072 parametri)
+```python
+class Encoder1(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.c1 = nn.Conv1d(1, 16, kernel_size=40, stride=2, padding=38, bias=False, padding_mode="replicate")   # L = 1043
+        self.bn1 = nn.BatchNorm1d(16)
+        self.c2 = nn.Conv1d(16, 32, kernel_size=20, stride=2, padding=18, bias=False, padding_mode="replicate") # L = 530
+        self.bn2 = nn.BatchNorm1d(32)
+        self.c3 = nn.Conv1d(32, 64, kernel_size=12, stride=2, padding=10, bias=False, padding_mode="replicate") # L = 270
+        self.bn3 = nn.BatchNorm1d(64)
+        self.c4 = nn.Conv1d(64, 128, kernel_size=8, stride=2, padding=6, bias=False, padding_mode="replicate")  # L = 138
+        self.bn4 = nn.BatchNorm1d(128)
+        self.c5 = nn.Conv1d(128, 16, kernel_size=4, stride=4, padding=2, bias=False, padding_mode="replicate")  # L = 35
+        self.bn5 = nn.BatchNorm1d(16)
+        self.fc = nn.Linear(16 * 35, 64, bias=False)
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        x = self.act(self.bn1(self.c1(x)))
+        x = self.act(self.bn2(self.c2(x)))
+        x = self.act(self.bn3(self.c3(x)))
+        x = self.act(self.bn4(self.c4(x)))
+        x = self.act(self.bn5(self.c5(x)))
+        return self.fc(torch.flatten(x, start_dim=1))
+
+class Decoder1(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(64, 16 * 35, bias=False)
+        self.bn0 = nn.BatchNorm1d(16)
+        self.ct5 = nn.ConvTranspose1d(16, 128, kernel_size=4, stride=4, padding=2, output_padding=2, bias=False) # L = 138
+        self.bn5 = nn.BatchNorm1d(128)
+        self.ct4 = nn.ConvTranspose1d(128, 64, kernel_size=8, stride=2, padding=6, bias=False)                    # L = 270
+        self.bn4 = nn.BatchNorm1d(64)
+        self.ct3 = nn.ConvTranspose1d(64, 32, kernel_size=12, stride=2, padding=10, bias=False)                   # L = 530
+        self.bn3 = nn.BatchNorm1d(32)
+        self.ct2 = nn.ConvTranspose1d(32, 16, kernel_size=20, stride=2, padding=18, output_padding=1, bias=False) # L = 1043
+        self.bn2 = nn.BatchNorm1d(16)
+        self.ct1 = nn.ConvTranspose1d(16, 1, kernel_size=40, stride=2, padding=38, bias=False)                    # L = 2048
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        x = self.fc(x)
+        x = x.view(-1, 16, 35)
+        x = self.act(self.bn0(x))
+        x = self.act(self.bn5(self.ct5(x)))
+        x = self.act(self.bn4(self.ct4(x)))
+        x = self.act(self.bn3(self.ct3(x)))
+        x = self.act(self.bn2(self.ct2(x)))
+        return self.ct1(x)
+```
+
+##### C. Analisi dei Miglioramenti
+1. **Piramidazione Multiscala dei Kernel ($40 \to 20 \to 12 \to 8 \to 4$)**:
+   - *Problema precedente*: $k=40$ uniforme anche quando la sequenza scendeva a 64 campioni, sovra-smussando i dettagli.
+   - *Miglioramento*: Kernel ampi all'ingresso catturano l'inspiral a bassa frequenza; kernel progressivamente più stretti risolvono le dinamiche rapide e localizzate del merger/ringdown.
+2. **Espansione Canonica dei Canali ($1 \to 16 \to 32 \to 64 \to 128$)**:
+   - *Problema precedente*: I canali si riducevano ($32 \to 16 \to 8$) mentre la dimensione temporale calava, creando un doppio collo di bottiglia che perdeva potere espressivo.
+   - *Miglioramento*: Crescita dei canali all'aumentare della profondità, massimizzando la diversità delle feature prima della proiezione latente.
+3. **Simmetria Speculare Rigorosa Decoder / Encoder**:
+   - *Problema precedente*: Decoder asimmetrico che collassava arbitrariamente a 1 canale con `unsqueeze(1)` e richiedeva un layer convolutivo finale $k=7$ per chiudere.
+   - *Miglioramento*: Inversione 1-a-1 esatta con deconv matching e reshaping multicanale `(B, 16, 35)`, garantendo gradienti stabili in retropropagazione.
+4. **Padding Replicate (`padding_mode="replicate"`)**:
+   - *Problema precedente*: Campioni agli estremi erano sotto-analizzati rispetto a campioni centrali del segnale (aggiunto un padding + grande e non zero)
+
+
+#### 2. Adozione di SOAP e Benchmark Comparativo con AdamW
+- **Ottimizzatore SOAP**: Metodo del second'ordine con precondizionamento Shampoo per tensori convoluzionali e lineari (`opt_add.SOAP(lr=5e-3, precondition_frequency=25, shampoo_beta=0.99, weight_decay=1e-9)`).
+- **Ipotesi da verificare**: Mitigare il condizionamento patologico rilevato nello studio NTK ($\kappa \approx 4.6 \times 10^{18}$) per accelerare la discesa sui gradienti deboli del merger.
+- **Confronto Diretto**: Test affiancato di run identiche con flag `--opt soap` vs `--opt adam` per stabilire quale ottimizzatore converga a minor errore sulla fase.
+
+#### 3. Training Unificato di Due Autoencoder in un'unica Pipeline (`train2AE.py`)
+- Gestione sincronizzata dell'addestramento dell'Autoencoder di Ampiezza e dell'Autoencoder di Fase.
+- Entrambi i modelli sono istanze indipendenti di `Autoencoder_CNN_1`, ciascuno guidato dalla loss pesata continua (`L1WeightLoss`, rampa $1.0 \to 5.0$ sugli ultimi campioni) e regolarizzazione dello spazio latente ($\lambda_{\text{latent}} = 10^{-5}$).
+- Logging, metriche, salvataggio checkpoint migliori (`_amplitude_best.pt`, `_phase_best.pt`) e generazione grafici unificati.
+
+#### 4. Implementazione del Waveform Mismatch Fisico
+- Integrazione della metrica di mismatch $\mathcal{M} = 1 - \mathcal{O}(h_{\text{true}}, h_{\text{rec}})$, con:
+  $$\mathcal{O}(h_1, h_2) = \frac{\text{Re}\langle h_1 | h_2 \rangle}{\sqrt{\langle h_1 | h_1 \rangle \langle h_2 | h_2 \rangle}}$$
+  dove $h(t) = A(t) e^{-i \phi(t)}$ ricombina le uscite dei due modelli dedicati.
+- Fornisce il criterio di verità per discriminare se la ricostruzione è indistinguibile dal segnale fisico reale per i rivelatori interferometrici.
+
 ---
 
 ## 3. Tutti i Test Condotti e Risultati Numerici
@@ -128,11 +258,14 @@ Misura del rapporto tra autovalore massimo e minimo del gradiente:
 
 | Approccio Provato | Esito | Dettaglio Tecnico |
 |---|---|---|
-| **CNN 1D vs Dense (AESur)** | **SUCCESSO** | La CNN 1D (~129k par) batte il DenseAE (3M-5.6M par) con un 23x di risparmio parametrico. |
+| **CNN 1D vs Dense (AESur)** | **SUCCESSO** | La CNN 1D (~129k - 291k par) batte il DenseAE (3M-5.6M par) con fino a 23x di risparmio parametrico. |
+| **Nuova Architettura Speculare (291k)** | **IN TEST** | Kernel piramidali $40 \to 4$, canali $1 \to 128$, padding replicate e perfetta simmetria decoder. |
 | **Target Ampiezza ($10^{-5}$)** | **SUCCESSO** | Raggiunto: $MAE = 6.26 \times 10^{-5}$, errore relativo $0.078\%$. |
 | **Abbattimento Weight Decay ($10^{-9}$)** | **SUCCESSO** | Ha impedito la cancellazione passiva dei pesi, sbloccando l'addestramento. |
 | **GELU + Regolarizzazione Latente $L_2$ ($10^{-5}$)** | **SUCCESSO** | Spazio latente a varianza piena (64/64 dimensioni attive) e training stabile. |
-| **Dimensione Latente $z=64$** | **SUCCESSO** | La SVD prova che il rango intrinseco del dataset è $< 10$: $z=64$ non rappresenta un collo di bottiglia limitante. |
+| **Ottimizzatore SOAP vs AdamW** | **IN TEST** | Precondizionamento del second'ordine per superare il condizionamento patologico dei gradienti. |
+| **Training Simultaneo a 2 AE (`train2AE.py`)** | **ATTIVO** | Esecuzione sincronizzata dei due modelli dedicati con loss pesata continua e logging unificato. |
+| **Metrica di Mismatch Waveform** | **IN CORSO** | Implementazione del mismatch $\mathcal{M}$ per benchmark astrofisico della fedeltà fisica d'onda. |
 | **Weight Decay di Optuna ($0.0098$)** | **FALLITO** | Azzeramento dei pesi pre-latenti e stallo a $L_1 > 10^{-3}$. |
 | **DoubleAE 2 Canali (`Autoencoder_CNN_2`)** | **FALLITO** | Interferenza cross-canale nello stesso bottleneck: MAE $0.23$ (collasso rispetto al modello singolo). |
 | **Scheduler troppo aggressivo (`factor=0.1`, `patience=250`)** | **FALLITO** | Precipita l'LR a $10^{-6}$ prematuramente o resta bloccato sui plateaux per centinaia di epoche. |
@@ -141,7 +274,7 @@ Misura del rapporto tra autovalore massimo e minimo del gradiente:
 
 ## 5. Sintesi Fisica e Prossimi Step Operativi
 
-1. **Abbandonare l'architettura congiunta a 2 canali**: concentrare la computazione sui modelli a canale singolo (`Autoencoder_CNN_1`), nettamente superiori.
-2. **Colmare il gap della fase ($6.28 \times 10^{-4} \to 10^{-5}$)**:
-   - **Completato e attivo**: implementata la `L1WeightLoss` con rampa continua ($1.0 \to 5.0$) per concentrare i gradienti sugli ultimi campioni del merger ($1.15 \times 10^{-3} \to 10^{-5}$) preservando la scala del learning rate.
-3. **Mantenere `ReduceLROnPlateau` Calibrato**: Utilizzare la configurazione testata (`factor=0.5`, `patience=75-100`, `threshold=1e-4`, `min_lr=1e-6`) che evita i drop prematuri a $10^{-6}$ e si adatta alla convergenza effettiva.
+1. **Confrontare SOAP vs AdamW**: Raccogliere le curve di validazione per verificare l'accelerazione di convergenza e la discesa della loss sulla fase.
+2. **Validare la Nuova Architettura Speculare**: Testare se la piramide di kernel ($40 \to 4$) e i 128 canali abbattono il gap residuo del merger sulla fase ($6.28 \times 10^{-4} \to 10^{-5}$).
+3. **Calcolare il Waveform Mismatch $\mathcal{M}$**: Misurare $\mathcal{M}$ sull'intero test set per quantificare la fedeltà del modello ricombinato $h = A e^{-i \phi}$.
+4. **Mantenere la Loss Pesata `L1WeightLoss` Continua**: Confermata la rampa $1.0 \to 5.0$ dal campione 1700 a 2048 per bilanciare l'inspiral con il picco del merger.

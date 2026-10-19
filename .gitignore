@@ -239,3 +239,6 @@ datasets/*
 # weights
 
 *.pt
+
+# Archive / old stuff
+old_stuff/
