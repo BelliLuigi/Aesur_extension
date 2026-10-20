@@ -20,3 +20,4 @@
     - 20/10 : tried adam vs soap, soap after 16 hours is still at 1600 epoch (adam already finished), but from a checkpoint model i looked at the mismatch distribution and is more tight than adam counterpart. I hope that in the next ~ 1300 epoch will lower loss under 1e-4.
     - 20/10 still: implemented Mismatch common loss of tasos, should work w/o Nans, since one loss for 2 Networks seems a degeneracy to me, i keep phase and validation loss along the common mismatch one, waiting for better ideas (next days: find a suitable value for LAMBDA_JOINT). Launched 2 training to benchmark soap+MAEsmatch (i called it like this) and adam+MAEsmatch.
     - Maybe in the next days i can try to apply the other suggestion of tasos that is scrap the phase (i hate it) in favor of the frequency. 
+    - Also i need to understand how to read latent space goodness or not.
