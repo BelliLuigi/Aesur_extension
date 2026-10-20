@@ -1,4 +1,4 @@
 #!/bin/bash 
 
  ### use uv run 
-uv run python train.py
+uv run python train2AE.py

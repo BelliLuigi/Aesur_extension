@@ -278,3 +278,9 @@ Misura del rapporto tra autovalore massimo e minimo del gradiente:
 2. **Validare la Nuova Architettura Speculare**: Testare se la piramide di kernel ($40 \to 4$) e i 128 canali abbattono il gap residuo del merger sulla fase ($6.28 \times 10^{-4} \to 10^{-5}$).
 3. **Calcolare il Waveform Mismatch $\mathcal{M}$**: Misurare $\mathcal{M}$ sull'intero test set per quantificare la fedeltà del modello ricombinato $h = A e^{-i \phi}$.
 4. **Mantenere la Loss Pesata `L1WeightLoss` Continua**: Confermata la rampa $1.0 \to 5.0$ dal campione 1700 a 2048 per bilanciare l'inspiral con il picco del merger.
+
+
+## 6. Oggi 20/10
+
+aggiunto la loss mismatch based, inserita però anche una loss individuale per ognuno degli autoencoders. 
+Iniziato a plottare la distribuzione del mismatch. 
