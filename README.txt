@@ -21,3 +21,12 @@
     - 20/10 still: implemented Mismatch common loss of tasos, should work w/o Nans, since one loss for 2 Networks seems a degeneracy to me, i keep phase and validation loss along the common mismatch one, waiting for better ideas (next days: find a suitable value for LAMBDA_JOINT). Launched 2 training to benchmark soap+MAEsmatch (i called it like this) and adam+MAEsmatch.
     - Maybe in the next days i can try to apply the other suggestion of tasos that is scrap the phase (i hate it) in favor of the frequency. 
     - Also i need to understand how to read latent space goodness or not.
+
+    - 21/10: 
+        - Soap led to a tighter mismatch distribution, less error in the reconstruction, just a spike at start and at end.
+        - discovered that probably adding batchnorm was like a big error, non the best thing if one looks for precise reconstruction, seems like it was proposed for classification.
+        - check if i normalize input data, i do not, i will evaluate if do so.
+        - checked matmul precision, probably I had active by pytorch default a thing that reduces precision in convolutions. I explicitly de-activated it. We'll see at next training what happens
+        - probably maesmatch need to be tailored a little bit more: i think to log of mismatch is dominating over the singular MAEs. I would like to try MSEloss too.
+
+        - started a new training in l1weightloss with no batchnorm AE. COmpares directly to 1910 run.

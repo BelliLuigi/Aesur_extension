@@ -11,7 +11,13 @@ from torch.optim import AdamW, lr_scheduler
 from torch.utils.data import DataLoader, random_split, TensorDataset
 import pytorch_optimizer as opt_add
 
-from models import Autoencoder_CNN_1
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.set_float32_matmul_precision('highest')
+torch.backends.cudnn.allow_tf32 = False
+
+
+
+from models import Autoencoder_CNN_1, Autoencoder_CNN_NOBN
 from utils import (
     get_phase,
     train_one_epoch,
@@ -101,12 +107,12 @@ else:
 # ---------------------------------------------------------------------------
 # Models, Loss Functions & Regularization
 # ---------------------------------------------------------------------------
-model_amplitude = Autoencoder_CNN_1().to(device)
-model_phase = Autoencoder_CNN_1().to(device)
+model_amplitude = Autoencoder_CNN_NOBN().to(device)#Autoencoder_CNN_1().to(device)
+model_phase = Autoencoder_CNN_NOBN().to(device)#Autoencoder_CNN_1().to(device)
 
 # Dedicated per-branch losses (used in both 'mae' and 'maesmatch' modes)
-loss_fn_amplitude = L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
-loss_fn_phase = L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
+loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3) #L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
+loss_fn_phase = nn.SmoothL1Loss(beta=1e-3) #L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
 
 if args.loss == "maesmatch":
     loss_fn_joint = AESurLoss().to(device)
