@@ -29,4 +29,5 @@
         - checked matmul precision, probably I had active by pytorch default a thing that reduces precision in convolutions. I explicitly de-activated it. We'll see at next training what happens
         - probably maesmatch need to be tailored a little bit more: i think to log of mismatch is dominating over the singular MAEs. I would like to try MSEloss too.
 
-        - started a new training in l1weightloss with no batchnorm AE. COmpares directly to 1910 run.
+        - started a new training in SmoothL1Loss with no batchnorm AE and high tf precision. Compare directly to 1910 run.
+        -thinking about normalizing data still.

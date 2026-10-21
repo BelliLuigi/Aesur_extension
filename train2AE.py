@@ -39,7 +39,7 @@ parser.add_argument("--title", type=str, default=None, help="Title / prefix for 
 parser.add_argument("--opt", type=str, choices=["adam", "soap"], default="adam", help="Optimizer choice: 'adam' or 'soap' (default: adam)")
 parser.add_argument("--loss", type=str, choices=["mae", "maesmatch"], default="mae", help="Loss choice: 'mae' (separate L1WeightLoss) or 'maesmatch' (hybrid direct L1WeightLoss + joint AESur composite loss)")
 parser.add_argument("--epochs", type=int, default=3000, help="Number of training epochs (default: 3000)")
-parser.add_argument("--lambda_joint", type=float, default=0.1, help="Weight of the joint complex waveform maesmatch loss (default: 0.1)")
+parser.add_argument("--lambda_joint", type=float, default=1e-3, help="Weight of the joint complex waveform maesmatch loss (default: 0.1)")
 args = parser.parse_args()
 
 title = args.title
