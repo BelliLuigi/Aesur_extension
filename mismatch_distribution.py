@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
-from models import Autoencoder_CNN_1
+from models import Autoencoder_CNN_1, Autoencoder_CNN_NOBN
 from utils import get_phase, compute_mismatches, plot_mismatch_distribution
 
 
@@ -122,14 +122,14 @@ def main():
 
     # Initialize models and load weights
     print(f"Loading Amplitude model: {args.ampl_model}")
-    model_amplitude = Autoencoder_CNN_1().to(device)
+    model_amplitude = Autoencoder_CNN_NOBN().to(device) #Autoencoder_CNN_1().to(device)
     state_a = torch.load(args.ampl_model, map_location=device)
     if "model_state_dict" in state_a:
         state_a = state_a["model_state_dict"]
     model_amplitude.load_state_dict(state_a)
 
     print(f"Loading Phase model:     {args.phase_model}")
-    model_phase = Autoencoder_CNN_1().to(device)
+    model_phase = Autoencoder_CNN_NOBN().to(device) #Autoencoder_CNN_1().to(device)
     state_p = torch.load(args.phase_model, map_location=device)
     if "model_state_dict" in state_p:
         state_p = state_p["model_state_dict"]

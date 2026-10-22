@@ -31,3 +31,10 @@
 
         - started a new training in SmoothL1Loss with no batchnorm AE and high tf precision. Compare directly to 1910 run.
         -thinking about normalizing data still.
+
+    - 22/10
+        - today i read papers mostly. ABout groupnorm, layernorm and batchnorm. I will try a run with GroupNorm with soap and Adam. 2210ù
+        - half results of 2110: smoothl1loss is better than simple MAE, also i think matmul helped.
+        - did not normalized data yet. 
+        - did a groupnorm architecture, fixed schedulers, added early stopping
+        - run soap2110 is reeally good eheheheheh

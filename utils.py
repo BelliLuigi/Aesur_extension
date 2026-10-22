@@ -319,21 +319,27 @@ def plot_training_curves(epochs, train_losses, val_losses, lrs, run_title, metri
     fig.patch.set_facecolor("#ffffff")
     ax.set_facecolor("#ffffff")
 
-    # Curves: Blue (Train), Red (Validation), Black (Learning Rate)
-    ax.plot(epochs, train_losses, label="Train Loss", color="blue", linewidth=1)
-    ax.plot(epochs, val_losses, label="Validation Loss", color="red", linewidth=1)
-    ax.plot(epochs, lrs, label="Learning Rate", color="black", linewidth=1.4, linestyle="--")
+    # Secondary y-axis for learning rate
+    ax_lr = ax.twinx()
 
-    # Logarithmic y-scale (safe because all losses are strictly > 0)
+    # Curves: Blue (Train), Red (Validation) on primary axis
+    l1 = ax.plot(epochs, train_losses, label="Train Loss", color="#1f77b4", linewidth=1.1)
+    l2 = ax.plot(epochs, val_losses, label="Validation Loss", color="#d62728", linewidth=1.1)
+
+    # Learning Rate (Black dashed) on secondary axis
+    l3 = ax_lr.plot(epochs, lrs, label="Learning Rate", color="black", linewidth=1.3, linestyle="--")
+
+    # Both y-axes are logarithmic
     ax.set_yscale("log")
+    ax_lr.set_yscale("log")
 
     # Minimum validation loss marker and horizontal line
     min_vloss_idx = int(np.argmin(val_losses))
     min_vloss = val_losses[min_vloss_idx]
     best_epoch = epochs[min_vloss_idx]
 
-    ax.axhline(y=min_vloss, color="red", linestyle=":", linewidth=1, alpha=0.85)
-    ax.scatter([best_epoch], [min_vloss], color="red", s=55, zorder=5)
+    ax.axhline(y=min_vloss, color="#d62728", linestyle=":", linewidth=1, alpha=0.85)
+    ax.scatter([best_epoch], [min_vloss], color="#d62728", s=55, zorder=5)
 
     # Offset tag annotation
     offset_y = min_vloss * 1.6 if min_vloss * 1.6 < max(val_losses) else min_vloss * 0.7
@@ -342,21 +348,27 @@ def plot_training_curves(epochs, train_losses, val_losses, lrs, run_title, metri
         xy=(best_epoch, min_vloss),
         xytext=(best_epoch, offset_y),
         arrowprops=dict(facecolor="black", shrink=0.08, width=1, headwidth=5),
-        bbox=dict(boxstyle="round,pad=0.35", edgecolor="red", facecolor="#fff5f5", alpha=0.95),
+        bbox=dict(boxstyle="round,pad=0.35", edgecolor="#d62728", facecolor="#fff5f5", alpha=0.95),
         fontsize=9,
         fontweight="bold",
     )
 
     ax.set_title(f"{run_title} - {metric_name} Training Curves", fontsize=13, fontweight="bold", pad=12)
     ax.set_xlabel("Epoch", fontsize=11, fontweight="semibold")
-    ax.set_ylabel("Loss / Learning Rate (Log Scale)", fontsize=11, fontweight="semibold")
+    ax.set_ylabel("Loss (Log Scale)", fontsize=11, fontweight="semibold", color="#d62728")
+    ax_lr.set_ylabel("Learning Rate (Log Scale)", fontsize=11, fontweight="semibold", color="black")
     ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.45)
-    ax.legend(frameon=True, facecolor="#ffffff", edgecolor="#cccccc", fontsize=10, loc="upper right")
+
+    # Combine legends from both axes
+    lines = l1 + l2 + l3
+    labels = [l.get_label() for l in lines]
+    ax.legend(lines, labels, frameon=True, facecolor="#ffffff", edgecolor="#cccccc", fontsize=10, loc="upper right")
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=300)
     plt.close(fig)
     print(f"Plot saved: {output_path}")
+
 
 
 def TasosOverlapTorch(h1, h2, dt=2 * 4.925794970773135e-06, eps: float = 1e-12):
@@ -521,3 +533,40 @@ def plot_mismatch_distribution(mismatches, run_title: str, output_path: str):
     fig.savefig(output_path, dpi=300)
     plt.close(fig)
     print(f"Mismatch distribution plot saved: {output_path}")
+
+
+class EarlyStopping:
+    """
+    Early stopping helper supporting relative ('rel') and absolute ('abs') improvement.
+    Monitors validation loss and signals termination when improvement ceases or when
+    the learning rate has reached its lower bound and progress halts.
+    """
+    def __init__(self, patience: int = 100, min_delta: float = 1e-3, mode: str = "rel", min_lr: float = 1e-6):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.mode = mode.lower()  # "rel" (percentage, e.g. 1e-3 = 0.1%) or "abs"
+        self.min_lr = min_lr
+        self.counter = 0
+        self.best_loss = float("inf")
+        self.early_stop = False
+
+    def step(self, val_loss: float, current_lr: float = None) -> bool:
+        if self.mode == "rel":
+            improved = val_loss < self.best_loss * (1.0 - self.min_delta)
+        else:
+            improved = val_loss < self.best_loss - self.min_delta
+
+        if improved:
+            self.best_loss = val_loss
+            self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+
+        # Stop if LR is at floor and loss has not improved for at least 20 epochs
+        if current_lr is not None and current_lr <= self.min_lr and self.counter >= 20:
+            self.early_stop = True
+
+        return self.early_stop
+
