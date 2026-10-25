@@ -235,3 +235,20 @@ class Autoencoder_CNN_NOBN(nn.Module):
             return out, z
         return out
 
+
+
+
+class SimplestMapper(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(in_features=3, out_features=16)
+        self.fc2 = nn.Linear(in_features=16, out_features=32)
+        self.fc3 = nn.Linear(in_features=32, out_features=64)
+        self.act = nn.GELU()
+    
+    def forward(self,x):
+        x = self.act(self.fc1(x))
+        x = self.act(self.fc2(x))
+        return self.fc3(x)         
+
+
