@@ -37,7 +37,7 @@ parser.add_argument("--model", type=str, choices=["autoencoder3", "autoencoder_c
 parser.add_argument("--opt", type=str, choices=["adam", "soap"], default="adam", help="Optimizer choice: 'adam' or 'soap' (default: adam)")
 parser.add_argument("--scheduler", type=str, choices=["plateau", "cosine"], default="plateau", help="LR scheduler choice: 'plateau' or 'cosine' (default: plateau)")
 parser.add_argument("--epochs", type=int, default=3000, help="Number of training epochs (default: 3000)")
-parser.add_argument("--early_stop", type=int, default=100, help="Early stopping patience in epochs (default: 100, set 0 to disable)")
+parser.add_argument("--early_stop", type=int, default=0, help="Early stopping patience in epochs (default: 100, set 0 to disable)")
 args = parser.parse_args()
 
 title = args.title
@@ -96,9 +96,9 @@ a_val   = Subset(ampl_tensor, j_val.indices)
 p_val   = Subset(phase_tensor, j_val.indices)
 
 test_loader = DataLoader(j_test, batch_size=1024, shuffle=False)
-a_train_loader = DataLoader(a_train, batch_size=64, shuffle=True)
+a_train_loader = DataLoader(a_train, batch_size=512, shuffle=True)
 a_val_loader = DataLoader(a_val, batch_size=2048, shuffle=False)
-p_train_loader = DataLoader(p_train, batch_size=64, shuffle=True)
+p_train_loader = DataLoader(p_train, batch_size=512, shuffle=True)
 p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 
 
@@ -123,11 +123,11 @@ lambda_latent = 1e-5
 # ---------------------------------------------------------------------------
 if args.opt.lower() == "soap":
     opt_fn_amplitude = opt_add.SOAP(
-        model_amplitude.parameters(), lr=4e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+        model_amplitude.parameters(), lr=3e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
         weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
     )
     opt_fn_phase = opt_add.SOAP(
-        model_phase.parameters(), lr=4e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+        model_phase.parameters(), lr=3e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
         weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
     )
 else:
@@ -136,10 +136,10 @@ else:
 
 if args.scheduler == "cosine":
     scheduler_amplitude = lr_scheduler.CosineAnnealingLR(
-        opt_fn_amplitude, T_max=args.epochs, eta_min=1e-6
+        opt_fn_amplitude, T_max=args.epochs, eta_min=5e-7
     )
     scheduler_phase = lr_scheduler.CosineAnnealingLR(
-        opt_fn_phase, T_max=args.epochs, eta_min=1e-6
+        opt_fn_phase, T_max=args.epochs, eta_min=5e-7
     )
 elif args.opt.lower() == "soap":
     scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(

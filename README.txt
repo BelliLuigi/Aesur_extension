@@ -38,3 +38,6 @@
         - did not normalized data yet. 
         - did a groupnorm architecture, fixed schedulers, added early stopping
         - run soap2110 is reeally good eheheheheh
+        - Running run:
+            - soapNOBN with cosine annealing 1660 epochs.
+            - soapGN with cosine annealing 1600 epochs 
