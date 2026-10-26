@@ -34,9 +34,9 @@ from utils import (
 parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Phase (NRHybSur3dq8)")
 parser.add_argument("--title", type=str, default=None, help="Title / prefix for this run (used in output filenames)")
 parser.add_argument("--model", type=str, choices=["autoencoder3", "autoencoder_cnn_nobn", "nobn"], default="nobn", help="Architecture: 'autoencoder3' (GroupNorm) or 'autoencoder_cnn_nobn'/'nobn' (No BatchNorm) (default: nobn)")
-parser.add_argument("--opt", type=str, choices=["adam", "soap"], default="adam", help="Optimizer choice: 'adam' or 'soap' (default: adam)")
+parser.add_argument("--opt", type=str, choices=["adam", "soap"], default="soap", help="Optimizer choice: 'adam' or 'soap' (default: soap)")
 parser.add_argument("--scheduler", type=str, choices=["plateau", "cosine"], default="plateau", help="LR scheduler choice: 'plateau' or 'cosine' (default: plateau)")
-parser.add_argument("--epochs", type=int, default=3000, help="Number of training epochs (default: 3000)")
+parser.add_argument("--epochs", type=int, default=5000, help="Number of training epochs (default: 3000)")
 parser.add_argument("--early_stop", type=int, default=0, help="Early stopping patience in epochs (default: 100, set 0 to disable)")
 args = parser.parse_args()
 
@@ -96,9 +96,9 @@ a_val   = Subset(ampl_tensor, j_val.indices)
 p_val   = Subset(phase_tensor, j_val.indices)
 
 test_loader = DataLoader(j_test, batch_size=1024, shuffle=False)
-a_train_loader = DataLoader(a_train, batch_size=512, shuffle=True)
+a_train_loader = DataLoader(a_train, batch_size=64, shuffle=True)
 a_val_loader = DataLoader(a_val, batch_size=2048, shuffle=False)
-p_train_loader = DataLoader(p_train, batch_size=512, shuffle=True)
+p_train_loader = DataLoader(p_train, batch_size=64, shuffle=True)
 p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 
 
@@ -123,12 +123,12 @@ lambda_latent = 1e-5
 # ---------------------------------------------------------------------------
 if args.opt.lower() == "soap":
     opt_fn_amplitude = opt_add.SOAP(
-        model_amplitude.parameters(), lr=3e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
-        weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
+        model_amplitude.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+        weight_decay=1e-9, precondition_frequency=25, merge_dims=False, eps=0.0001
     )
     opt_fn_phase = opt_add.SOAP(
-        model_phase.parameters(), lr=3e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
-        weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
+        model_phase.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+        weight_decay=1e-9, precondition_frequency=25, merge_dims=False, eps=0.0001
     )
 else:
     opt_fn_amplitude = AdamW(model_amplitude.parameters(), lr=4e-3, weight_decay=0)
@@ -143,10 +143,10 @@ if args.scheduler == "cosine":
     )
 elif args.opt.lower() == "soap":
     scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
-        opt_fn_amplitude, factor=0.5, patience=50, threshold=0.0001, threshold_mode="rel", min_lr=1e-6, cooldown=15
+        opt_fn_amplitude, factor=0.5, patience=150, threshold=0.0001, threshold_mode="rel", min_lr=5e-7, cooldown=50
     )
     scheduler_phase = lr_scheduler.ReduceLROnPlateau(
-        opt_fn_phase, factor=0.5, patience=50, threshold=0.0001, threshold_mode="rel", min_lr=1e-6, cooldown=15
+        opt_fn_phase, factor=0.5, patience=150, threshold=0.0001, threshold_mode="rel", min_lr=5e-7, cooldown=50
     )
 else:
     scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(

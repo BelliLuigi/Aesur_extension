@@ -30,13 +30,13 @@ parser = argparse.ArgumentParser(description="Train 2 FullModels for Amplitude a
 parser.add_argument("--title", type=str, default=None, help="Title / prefix for this run (used in output filenames)")
 #parser.add_argument("--model", type=str, choices=["autoencoder3", "autoencoder_cnn_nobn", "nobn"], default="nobn", help="Architecture: 'autoencoder3' (GroupNorm) or 'autoencoder_cnn_nobn'/'nobn' (No BatchNorm) (default: nobn)")
 #parser.add_argument("--opt", type=str, choices=["adam", "soap"], default="adam", help="Optimizer choice: 'adam' or 'soap' (default: adam)")
-#parser.add_argument("--scheduler", type=str, choices=["plateau", "cosine"], default="plateau", help="LR scheduler choice: 'plateau' or 'cosine' (default: plateau)")
-parser.add_argument("--epochs", type=int, default=3000, help="Number of training epochs (default: 3000)")
+parser.add_argument("--scheduler", type=str, choices=["plateau", "cosine"], default="plateau", help="LR scheduler choice: 'plateau' or 'cosine' (default: plateau)")
+parser.add_argument("--epochs", type=int, default=5000, help="Number of training epochs (default: 3000)")
 #parser.add_argument("--early_stop", type=int, default=0, help="Early stopping patience in epochs (default: 100, set 0 to disable)")
 args = parser.parse_args()
 
 opt_name = "SOAP"
-sched_name = "CosineAnnealingLR"
+sched_name = args.scheduler.upper()
 
 title = args.title
 if not title:
@@ -138,12 +138,20 @@ opt_fn_phase = opt_add.SOAP(
     model_phase.parameters(), lr=3e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
     weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
 )
-scheduler_amplitude = lr_scheduler.CosineAnnealingLR(
-    opt_fn_amplitude, T_max=args.epochs, eta_min=5e-7
-)
-scheduler_phase = lr_scheduler.CosineAnnealingLR(
-    opt_fn_phase, T_max=args.epochs, eta_min=5e-7
-)
+if args.scheduler == "cosine":
+    scheduler_amplitude = lr_scheduler.CosineAnnealingLR(
+        opt_fn_amplitude, T_max=args.epochs, eta_min=5e-7
+    )
+    scheduler_phase = lr_scheduler.CosineAnnealingLR(
+        opt_fn_phase, T_max=args.epochs, eta_min=5e-7
+    )
+else:
+    scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
+        opt_fn_amplitude, factor=0.5, patience=100, threshold=0.0001, threshold_mode="rel", min_lr=1e-6, cooldown=50
+    )
+    scheduler_phase = lr_scheduler.ReduceLROnPlateau(
+        opt_fn_phase, factor=0.5, patience=100, threshold=0.0001, threshold_mode="rel", min_lr=1e-6, cooldown=50
+    )
 
 # ---------------------------------------------------------------------------
 # Training Loop
@@ -189,7 +197,10 @@ for epoch in range(args.epochs):
             total_loss_amplitudeV += loss_amp.item()
     total_loss_amplitudeV /= max(len(a_val_loader), 1)
     
-    scheduler_amplitude.step()
+    if args.scheduler == "plateau":
+        scheduler_amplitude.step(total_loss_amplitudeV)
+    else:
+        scheduler_amplitude.step()
 
     model_phase.train(True)
     total_loss_phaseT = 0.0
@@ -215,7 +226,10 @@ for epoch in range(args.epochs):
             total_loss_phaseV += loss_phase.item()
     total_loss_phaseV /= max(len(p_val_loader), 1)
 
-    scheduler_phase.step()
+    if args.scheduler == "plateau":
+        scheduler_phase.step(total_loss_phaseV)
+    else:
+        scheduler_phase.step()
 
     current_lr_ampl = scheduler_amplitude.get_last_lr()[0]
     current_lr_ph = scheduler_phase.get_last_lr()[0]
