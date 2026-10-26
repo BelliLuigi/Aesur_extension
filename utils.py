@@ -538,13 +538,7 @@ def plot_mismatch_distribution(mismatches, run_title: str, output_path: str):
 class EarlyStopping:
     """
     Multi-criteria Early Stopping aligned with ReduceLROnPlateau dynamics.
-
-    Stopping Criteria:
-      1. LR-Floor Plateau (primary): Learning rate has reached its floor (current_lr <= min_lr * 1.05)
-         AND loss has not improved by relative threshold for patience_at_min_lr epochs.
-      2. Multi-Plateau Exhaustion (global): No relative improvement (> threshold) for global
-         patience epochs (sized to allow multiple scheduler decay cycles).
-      3. Divergence guard: Loss becomes NaN/Inf or explodes beyond divergence_factor * best_loss.
+    Requires sustained divergence over multiple consecutive epochs to prevent false triggers.
     """
     def __init__(
         self,
@@ -553,7 +547,8 @@ class EarlyStopping:
         min_lr: float = 5e-7,
         patience_at_min_lr: int = 150,
         mode: str = "rel",
-        divergence_factor: float = 10.0,
+        divergence_factor: float = 100.0,
+        patience_divergence: int = 5,
         min_delta: float = None,
     ):
         self.patience = patience
@@ -562,26 +557,36 @@ class EarlyStopping:
         self.patience_at_min_lr = patience_at_min_lr
         self.mode = mode.lower()
         self.divergence_factor = divergence_factor
+        self.patience_divergence = patience_divergence
 
         self.counter = 0
         self.counter_at_min_lr = 0
+        self.divergence_counter = 0
         self.best_loss = float("inf")
         self.early_stop = False
         self.stop_reason = ""
 
     def step(self, val_loss: float, current_lr: float = None) -> bool:
-        # 1. Divergence / NaN guard
+        # 1. NaN / Inf guard (instant stop)
         if np.isnan(val_loss) or np.isinf(val_loss):
             self.early_stop = True
             self.stop_reason = "Loss became NaN or Inf"
             return True
 
-        if self.best_loss < float("inf") and val_loss > self.best_loss * self.divergence_factor:
-            self.early_stop = True
-            self.stop_reason = f"Loss diverged ({val_loss:.2e} > {self.divergence_factor}x best {self.best_loss:.2e})"
-            return True
+        # 2. Divergence guard: only trigger if loss stays > divergence_factor * best_loss for N epochs
+        if self.best_loss < float("inf") and val_loss > max(1.0, self.best_loss * self.divergence_factor):
+            self.divergence_counter += 1
+            if self.divergence_counter >= self.patience_divergence:
+                self.early_stop = True
+                self.stop_reason = (
+                    f"Loss diverged ({val_loss:.2e} > {self.divergence_factor}x best {self.best_loss:.2e}) "
+                    f"for {self.divergence_counter} consecutive epochs"
+                )
+                return True
+        else:
+            self.divergence_counter = 0
 
-        # 2. Check improvement (aligned with ReduceLROnPlateau relative threshold)
+        # 3. Check improvement
         if self.mode == "rel":
             improved = val_loss < self.best_loss * (1.0 - self.threshold)
         else:
@@ -591,6 +596,8 @@ class EarlyStopping:
             self.best_loss = val_loss
             self.counter = 0
             self.counter_at_min_lr = 0
+            self.early_stop = False
+            self.stop_reason = ""
         else:
             self.counter += 1
 
@@ -600,11 +607,11 @@ class EarlyStopping:
                 if self.counter_at_min_lr >= self.patience_at_min_lr:
                     self.early_stop = True
                     self.stop_reason = (
-                        f"LR at minimum floor ({current_lr:.2e} <= {self.min_lr:.2e}) "
-                        f"with no improvement for {self.counter_at_min_lr} epochs"
+                        f"LR at floor ({current_lr:.2e} <= {self.min_lr:.2e}) "
+                        f"without improvement for {self.counter_at_min_lr} epochs"
                     )
 
-            # Condition B: Global patience exhausted across multiple LR drops
+            # Condition B: Global patience exhausted
             if self.patience > 0 and self.counter >= self.patience:
                 self.early_stop = True
                 self.stop_reason = (
@@ -613,6 +620,3 @@ class EarlyStopping:
                 )
 
         return self.early_stop
-
-
-
