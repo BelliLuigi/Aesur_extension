@@ -37,7 +37,7 @@ parser.add_argument("--model", type=str, choices=["autoencoder3", "autoencoder_c
 parser.add_argument("--opt", type=str, choices=["adam", "soap"], default="soap", help="Optimizer choice: 'adam' or 'soap' (default: soap)")
 parser.add_argument("--scheduler", type=str, choices=["plateau", "cosine"], default="plateau", help="LR scheduler choice: 'plateau' or 'cosine' (default: plateau)")
 parser.add_argument("--epochs", type=int, default=5000, help="Number of training epochs (default: 3000)")
-parser.add_argument("--early_stop", type=int, default=0, help="Early stopping patience in epochs (default: 100, set 0 to disable)")
+parser.add_argument("--early_stop", type=int, default=400, help="Early stopping patience in epochs (default: 100, set 0 to disable)")
 args = parser.parse_args()
 
 title = args.title
@@ -174,9 +174,14 @@ history = {
 
 # Early Stopping Initialization
 if args.early_stop > 0:
-    early_stop_amplitude = EarlyStopping(patience=args.early_stop, min_delta=1e-3, mode="rel", min_lr=1e-6)
-    early_stop_phase = EarlyStopping(patience=args.early_stop, min_delta=1e-3, mode="rel", min_lr=1e-6)
-    print(f"Early stopping enabled: patience={args.early_stop} epochs (relative delta=0.1%)")
+    min_lr_target = 5e-7 if args.opt.lower() == "soap" else 1e-6
+    early_stop_amplitude = EarlyStopping(
+        patience=args.early_stop, threshold=0.0001, mode="rel", min_lr=min_lr_target, patience_at_min_lr=150
+    )
+    early_stop_phase = EarlyStopping(
+        patience=args.early_stop, threshold=0.0001, mode="rel", min_lr=min_lr_target, patience_at_min_lr=150
+    )
+    print(f"Early stopping enabled: global_patience={args.early_stop}, floor_patience=150 at min_lr={min_lr_target:.1e} (rel threshold=0.01%)")
 else:
     print("Early stopping disabled.")
 
@@ -255,8 +260,8 @@ for epoch in range(args.epochs):
         stop_p = early_stop_phase.step(avg_vloss_ph, current_lr_ph)
         if stop_a and stop_p:
             print(f"\n=== [Early Stopping Triggered at Epoch {epoch + 1}] ===")
-            print(f"  Amplitude: Best Val Loss {best_vloss_amplitude:.3e} (plateaued for {early_stop_amplitude.counter} epochs)")
-            print(f"  Phase:     Best Val Loss {best_vloss_phase:.3e} (plateaued for {early_stop_phase.counter} epochs)")
+            print(f"  Amplitude: {early_stop_amplitude.stop_reason}")
+            print(f"  Phase:     {early_stop_phase.stop_reason}")
             break
 
 

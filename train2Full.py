@@ -31,8 +31,8 @@ parser.add_argument("--title", type=str, default=None, help="Title / prefix for 
 #parser.add_argument("--model", type=str, choices=["autoencoder3", "autoencoder_cnn_nobn", "nobn"], default="nobn", help="Architecture: 'autoencoder3' (GroupNorm) or 'autoencoder_cnn_nobn'/'nobn' (No BatchNorm) (default: nobn)")
 #parser.add_argument("--opt", type=str, choices=["adam", "soap"], default="adam", help="Optimizer choice: 'adam' or 'soap' (default: adam)")
 parser.add_argument("--scheduler", type=str, choices=["plateau", "cosine"], default="plateau", help="LR scheduler choice: 'plateau' or 'cosine' (default: plateau)")
-parser.add_argument("--epochs", type=int, default=5000, help="Number of training epochs (default: 3000)")
-#parser.add_argument("--early_stop", type=int, default=0, help="Early stopping patience in epochs (default: 100, set 0 to disable)")
+parser.add_argument("--epochs", type=int, default=5000, help="Number of training epochs (default: 5000)")
+parser.add_argument("--early_stop", type=int, default=400, help="Early stopping patience in epochs (default: 0 disabled, e.g. 400)")
 args = parser.parse_args()
 
 opt_name = "SOAP"
@@ -169,6 +169,17 @@ history = {
     "lr_phase": [],
 }
 
+# Early Stopping Initialization
+if args.early_stop > 0:
+    early_stop_amplitude = EarlyStopping(
+        patience=args.early_stop, threshold=0.0001, mode="rel", min_lr=1e-6, patience_at_min_lr=100
+    )
+    early_stop_phase = EarlyStopping(
+        patience=args.early_stop, threshold=0.0001, mode="rel", min_lr=1e-6, patience_at_min_lr=100
+    )
+    print(f"Early stopping enabled: global_patience={args.early_stop}, floor_patience=100 at min_lr=1e-6 (rel threshold=0.01%)")
+else:
+    print("Early stopping disabled.")
 
 for epoch in range(args.epochs):
     model_amplitude.train(True)
@@ -269,6 +280,16 @@ for epoch in range(args.epochs):
             },
             f"{title}_phase_checkpoint.pt",
         )
+
+    # Check Early Stopping
+    if args.early_stop > 0:
+        stop_a = early_stop_amplitude.step(total_loss_amplitudeV, current_lr_ampl)
+        stop_p = early_stop_phase.step(total_loss_phaseV, current_lr_ph)
+        if stop_a and stop_p:
+            print(f"\n=== [Early Stopping Triggered at Epoch {epoch + 1}] ===")
+            print(f"  Amplitude: {early_stop_amplitude.stop_reason}")
+            print(f"  Phase:     {early_stop_phase.stop_reason}")
+            break
 
 # ---------------------------------------------------------------------------
 # Save 1 Unified CSV History
