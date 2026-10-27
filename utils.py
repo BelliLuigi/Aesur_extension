@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
+from pycbc import conversions
 
 
 def get_phase(dataset):
@@ -620,3 +621,42 @@ class EarlyStopping:
                 )
 
         return self.early_stop
+
+
+def get_NR_data(group, key):
+    if key == "waveform":
+        out = (
+            group["waveform"]["(2,2)"][:]
+            if "waveform" in group.keys()
+            else group["Lev1/waveform"][:]
+        )
+        out = out[-2048:]
+    elif key == "metadata":
+        metagroup = "metadata"
+        q = group[f"{metagroup}/mass_ratio"][()]
+        s1z = group[f"{metagroup}/dimensionless_spin1"][2][()]
+        s2z = group[f"{metagroup}/dimensionless_spin2"][2][()]
+        s1y = group[f"{metagroup}/dimensionless_spin1"][1][()]
+        s1x = group[f"{metagroup}/dimensionless_spin1"][0][()]
+        s2y = group[f"{metagroup}/dimensionless_spin2"][1][()]
+        s2x = group[f"{metagroup}/dimensionless_spin2"][0][()]
+        ecc = group[f"{metagroup}/eccentricity"][()]
+        m2 = 100 * q / (1 + q)
+        m1 = 100 - m2
+        chi_p = conversions.chi_p(m1, m2, s1x, s1y, s2x, s2y)
+        out = np.array([q, s1z, s2z, chi_p, ecc])
+    else:
+        out = None
+    return out
+
+
+def farthest_point_sampling(pts: torch.Tensor, n_samples: int) -> torch.Tensor:
+    """Selects n_samples that maximally span the normalized 3D parameter space."""
+    p_norm = (pts - pts.min(dim=0).values) / (pts.max(dim=0).values - pts.min(dim=0).values + 1e-8)
+    selected = [0]
+    dists = torch.cdist(p_norm, p_norm[0:1]).squeeze(1)
+    for _ in range(1, n_samples):
+        next_idx = torch.argmax(dists).item()
+        selected.append(next_idx)
+        dists = torch.minimum(dists, torch.cdist(p_norm, p_norm[next_idx : next_idx + 1]).squeeze(1))
+    return torch.tensor(selected)
