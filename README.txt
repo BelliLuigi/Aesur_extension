@@ -45,5 +45,8 @@
         - Cosine Annealing is not good bc there is no patience, soap has no time to settle in its LR magnitude.
         - GN seems not good, sligthly worst Mismatch distribution. Makes sense. Soap does not need normalization, is very robust.
         - AdamW confirmed worst bc it needs Normalization layers and mismatch distribution is 1 order of magnitude shifted wrt Soap's distribution.
-        - trained a FM with a small mapper, but used cosine annealing, will try again with RLROP (spreaded distribution a lot...)
+        - trained a FM with a small mapper, but used cosine annealing, will try again with RLROP (spreaded distribution a lot…)
+    - 27/10 
+        - Training is going good both of Definitive AE and PRE-Full
+        - Added finetune executable.
         
