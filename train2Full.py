@@ -31,8 +31,8 @@ parser.add_argument("--title", type=str, default=None, help="Title / prefix for 
 #parser.add_argument("--model", type=str, choices=["autoencoder3", "autoencoder_cnn_nobn", "nobn"], default="nobn", help="Architecture: 'autoencoder3' (GroupNorm) or 'autoencoder_cnn_nobn'/'nobn' (No BatchNorm) (default: nobn)")
 #parser.add_argument("--opt", type=str, choices=["adam", "soap"], default="adam", help="Optimizer choice: 'adam' or 'soap' (default: adam)")
 parser.add_argument("--scheduler", type=str, choices=["plateau", "cosine"], default="plateau", help="LR scheduler choice: 'plateau' or 'cosine' (default: plateau)")
-parser.add_argument("--epochs", type=int, default=5000, help="Number of training epochs (default: 5000)")
-parser.add_argument("--early_stop", type=int, default=400, help="Early stopping patience in epochs (default: 0 disabled, e.g. 400)")
+parser.add_argument("--epochs", type=int, default=3000, help="Number of training epochs (default: 3000)")
+parser.add_argument("--early_stop", type=int, default=0, help="Early stopping patience in epochs (default: 0 disabled, e.g. 400)")
 args = parser.parse_args()
 
 opt_name = "SOAP"
@@ -107,9 +107,9 @@ a_val   = Subset(a_dataset, j_val.indices)
 p_val   = Subset(p_dataset, j_val.indices)
 
 test_loader = DataLoader(j_test, batch_size=1024, shuffle=False)
-a_train_loader = DataLoader(a_train, batch_size=512, shuffle=True)
+a_train_loader = DataLoader(a_train, batch_size=128, shuffle=True)
 a_val_loader = DataLoader(a_val, batch_size=2048, shuffle=False)
-p_train_loader = DataLoader(p_train, batch_size=512, shuffle=True)
+p_train_loader = DataLoader(p_train, batch_size=128, shuffle=True)
 p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 
 
@@ -118,8 +118,8 @@ model_phase = SimplestMapper().to(device)
 
 ae_amplitude = Autoencoder_CNN_NOBN().to(device)
 ae_phase = Autoencoder_CNN_NOBN().to(device)
-ae_amplitude.load_state_dict(torch.load("model_weights/soap2110_amplitude_best.pt", map_location=device))
-ae_phase.load_state_dict(torch.load("model_weights/soap2110_phase_best.pt", map_location=device))
+ae_amplitude.load_state_dict(torch.load("model_weights/soapNOBN2610_amplitude_best.pt", map_location=device))
+ae_phase.load_state_dict(torch.load("model_weights/soapNOBN2610_phase_best.pt", map_location=device))
 
 filter_amplitude = ae_amplitude.decoder.eval()
 filter_phase = ae_phase.decoder.eval()
@@ -134,11 +134,11 @@ loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3)
 loss_fn_phase = nn.SmoothL1Loss(beta=1e-3)
 
 opt_fn_amplitude = opt_add.SOAP(
-    model_amplitude.parameters(), lr=3e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+    model_amplitude.parameters(), lr=2e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
     weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
 )
 opt_fn_phase = opt_add.SOAP(
-    model_phase.parameters(), lr=3e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+    model_phase.parameters(), lr=2e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
     weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
 )
 if args.scheduler == "cosine":

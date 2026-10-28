@@ -48,17 +48,17 @@ parser.add_argument("--title", type=str, default=None, help="Title / prefix for 
 parser.add_argument(
     "--checkpoint_ampl",
     type=str,
-    default="model_weights/soapFull2110-2610_amplitude_best.pt",
-    help="Path to pretrained amplitude FullModel checkpoint (default: model_weights/soapFull2110-2610_amplitude_best.pt)",
+    default="model_weights/soapFull1910-2610_amplitude_best.pt",
+    help="Path to pretrained amplitude FullModel checkpoint (default: model_weights/soapFull1910-2610_amplitude_best.pt)",
 )
 parser.add_argument(
     "--checkpoint_phase",
     type=str,
-    default="model_weights/soapFull2110-2610_phase_best.pt",
-    help="Path to pretrained phase FullModel checkpoint (default: model_weights/soapFull2110-2610_phase_best.pt)",
+    default="model_weights/soapFull1910-2610_phase_best.pt",
+    help="Path to pretrained phase FullModel checkpoint (default: model_weights/soapFull1910-2610_phase_best.pt)",
 )
-parser.add_argument("--epochs", type=int, default=2000, help="Number of training epochs per fold (default: 500)")
-parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate for finetuning (default: 3e-3)")
+parser.add_argument("--epochs", type=int, default=3000, help="Number of training epochs per fold (default: 500)")
+parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate for finetuning (default: 3e-3)")
 parser.add_argument("--early_stop", type=int, default=0, help="Early stopping patience in epochs (default: 100, 0 to disable)")
 args = parser.parse_args()
 
