@@ -15,7 +15,7 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.set_float32_matmul_precision('highest')
 torch.backends.cudnn.allow_tf32 = False
 
-from models import Autoencoder3, Autoencoder_CNN_NOBN, SimplestMapper
+from models import Autoencoder3, Autoencoder_CNN_NOBN, SimplestMapper, FullModel
 from utils import (
     get_phase,
     train_one_epoch,
@@ -126,6 +126,9 @@ filter_phase = ae_phase.decoder.eval()
 
 filter_amplitude.requires_grad_(False)
 filter_phase.requires_grad_(False)
+
+full_model_ampl = FullModel(model_amplitude, filter_amplitude).to(device)
+full_model_phase = FullModel(model_phase, filter_phase).to(device)
 
 loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3)
 loss_fn_phase = nn.SmoothL1Loss(beta=1e-3)
@@ -255,11 +258,11 @@ for epoch in range(args.epochs):
 
     if total_loss_amplitudeV < best_vloss_amplitude:
         best_vloss_amplitude = total_loss_amplitudeV
-        torch.save(model_amplitude.state_dict(), f"{title}_amplitude_best.pt")
+        torch.save(full_model_ampl.state_dict(), f"{title}_amplitude_best.pt")
         torch.save(
             {
                 "epoch": epoch + 1,
-                "model_state_dict": model_amplitude.state_dict(),
+                "model_state_dict": full_model_ampl.state_dict(),
                 "optimizer_state_dict": opt_fn_amplitude.state_dict(),
                 "scheduler_state_dict": scheduler_amplitude.state_dict(),
                 "best_vloss": best_vloss_amplitude,
@@ -269,11 +272,11 @@ for epoch in range(args.epochs):
 
     if total_loss_phaseV < best_vloss_phase:
         best_vloss_phase = total_loss_phaseV
-        torch.save(model_phase.state_dict(), f"{title}_phase_best.pt")
+        torch.save(full_model_phase.state_dict(), f"{title}_phase_best.pt")
         torch.save(
             {
                 "epoch": epoch + 1,
-                "model_state_dict": model_phase.state_dict(),
+                "model_state_dict": full_model_phase.state_dict(),
                 "optimizer_state_dict": opt_fn_phase.state_dict(),
                 "scheduler_state_dict": scheduler_phase.state_dict(),
                 "best_vloss": best_vloss_phase,
@@ -333,26 +336,8 @@ best_ampl_path = f"{title}_amplitude_best.pt"
 best_phase_path = f"{title}_phase_best.pt"
 
 print(f"\nLoading best saved models for mismatch evaluation...")
-model_amplitude.load_state_dict(torch.load(best_ampl_path, map_location=device))
-model_phase.load_state_dict(torch.load(best_phase_path, map_location=device))
-
-
-class FullModel(nn.Module):
-    def __init__(self, mapper: nn.Module, decoder: nn.Module):
-        super().__init__()
-        self.mapper = mapper
-        self.decoder = decoder
-
-    def forward(self, x):
-        z = self.mapper(x)
-        out = self.decoder(z)
-        if out.ndim == 3 and out.size(1) == 1:
-            out = out.squeeze(1)
-        return out
-
-
-full_model_ampl = FullModel(model_amplitude, filter_amplitude).to(device)
-full_model_phase = FullModel(model_phase, filter_phase).to(device)
+full_model_ampl.load_state_dict(torch.load(best_ampl_path, map_location=device))
+full_model_phase.load_state_dict(torch.load(best_phase_path, map_location=device))
 full_model_ampl.eval()
 full_model_phase.eval()
 

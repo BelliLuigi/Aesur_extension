@@ -12,7 +12,7 @@ import pytorch_optimizer as opt_add
 import sxs
 from pycbc import conversions
 
-from models import Autoencoder_CNN_NOBN, SimplestMapper
+from models import SimplestMapper, DecoderNOBN, FullModel
 from utils import (
     get_phase,
     get_NR_data,
@@ -35,20 +35,31 @@ else:
     print("Using CPU device.")
 
 # ---------------------------------------------------------------------------
-# Hyperparameters & Paths
+# Hyperparameters & Defaults
 # ---------------------------------------------------------------------------
 BATCH_SIZE = 32
 K_FOLDS = 5
-CHECKPOINT_AMPL_PATH = "model_weights/soap2110_amplitude_best.pt"
-CHECKPOINT_PHASE_PATH = "model_weights/soap2110_phase_best.pt"
 
 # ---------------------------------------------------------------------------
 # Argument Parser
 # ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser(description="Finetune FullModels with K-Fold CV on SXS (NRHybSur3dq8)")
 parser.add_argument("--title", type=str, default=None, help="Title / prefix for this run")
-parser.add_argument("--epochs", type=int, default=500, help="Number of training epochs per fold (default: 500)")
-parser.add_argument("--early_stop", type=int, default=100, help="Early stopping patience in epochs (default: 100, 0 to disable)")
+parser.add_argument(
+    "--checkpoint_ampl",
+    type=str,
+    default="model_weights/soapFull2110-2610_amplitude_best.pt",
+    help="Path to pretrained amplitude FullModel checkpoint (default: model_weights/soapFull2110-2610_amplitude_best.pt)",
+)
+parser.add_argument(
+    "--checkpoint_phase",
+    type=str,
+    default="model_weights/soapFull2110-2610_phase_best.pt",
+    help="Path to pretrained phase FullModel checkpoint (default: model_weights/soapFull2110-2610_phase_best.pt)",
+)
+parser.add_argument("--epochs", type=int, default=3000, help="Number of training epochs per fold (default: 500)")
+parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate for finetuning (default: 3e-3)")
+parser.add_argument("--early_stop", type=int, default=0, help="Early stopping patience in epochs (default: 100, 0 to disable)")
 args = parser.parse_args()
 
 title = args.title
@@ -62,48 +73,44 @@ if not title:
 
 print(f"=== Starting 5-Fold Finetuning Run: {title} | Epochs/fold: {args.epochs} | Scheduler: ReduceLROnPlateau ===")
 
-# ---------------------------------------------------------------------------
-# Architecture: FullModel with Unfrozen Decoder
-# ---------------------------------------------------------------------------
-class FullModel(nn.Module):
-    def __init__(self, mapper: nn.Module, decoder: nn.Module):
-        super().__init__()
-        self.mapper = mapper
-        self.decoder = decoder
 
-    def forward(self, x):
-        z = self.mapper(x)
-        out = self.decoder(z)
-        if out.ndim == 3 and out.size(1) == 1:
-            out = out.squeeze(1)
-        return out
+def load_checkpoint_weights(model: FullModel, ckpt_path: str):
+    """Loads weights into FullModel supporting FullModel, mapper-only, or AE state dicts."""
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint '{ckpt_path}' not found.")
+    sd = torch.load(ckpt_path, map_location=device)
+    if isinstance(sd, dict) and "model_state_dict" in sd:
+        sd = sd["model_state_dict"]
+
+    if any(k.startswith("mapper.") for k in sd.keys()):
+        model.load_state_dict(sd)
+        print(f"Loaded FullModel weights from: {ckpt_path}")
+    elif any(k.startswith("fc1.") for k in sd.keys()):
+        model.mapper.load_state_dict(sd)
+        print(f"Loaded mapper weights from: {ckpt_path}")
+    elif any(k.startswith("decoder.") for k in sd.keys()) or any(k.startswith("encoder.") for k in sd.keys()):
+        model.decoder.load_state_dict(sd, strict=False)
+        print(f"[Warning] Loaded decoder only from AE checkpoint: {ckpt_path}")
+    else:
+        model.load_state_dict(sd, strict=False)
+        print(f"Loaded weights with strict=False from: {ckpt_path}")
 
 
-def build_full_models():
-    """Initializes fresh mappers and reloads pretrained decoder weights for each fold."""
+def build_full_models(checkpoint_ampl: str, checkpoint_phase: str):
+    """Initializes FullModels and reloads pretrained mapper and decoder weights."""
     model_amplitude = SimplestMapper().to(device)
     model_phase = SimplestMapper().to(device)
+    decoder_amplitude = DecoderNOBN().to(device)
+    decoder_phase = DecoderNOBN().to(device)
 
-    ae_amplitude = Autoencoder_CNN_NOBN().to(device)
-    ae_phase = Autoencoder_CNN_NOBN().to(device)
+    full_model_ampl = FullModel(model_amplitude, decoder_amplitude).to(device)
+    full_model_phase = FullModel(model_phase, decoder_phase).to(device)
 
-    if os.path.exists(CHECKPOINT_AMPL_PATH):
-        ae_amplitude.load_state_dict(torch.load(CHECKPOINT_AMPL_PATH, map_location=device), strict=False)
-    else:
-        print(f"[Warning] Pretrained amplitude checkpoint '{CHECKPOINT_AMPL_PATH}' not found. Initializing decoder randomly.")
+    load_checkpoint_weights(full_model_ampl, checkpoint_ampl)
+    load_checkpoint_weights(full_model_phase, checkpoint_phase)
 
-    if os.path.exists(CHECKPOINT_PHASE_PATH):
-        ae_phase.load_state_dict(torch.load(CHECKPOINT_PHASE_PATH, map_location=device), strict=False)
-    else:
-        print(f"[Warning] Pretrained phase checkpoint '{CHECKPOINT_PHASE_PATH}' not found. Initializing decoder randomly.")
-
-    filter_amplitude = ae_amplitude.decoder
-    filter_phase = ae_phase.decoder
-    filter_amplitude.requires_grad_(True)
-    filter_phase.requires_grad_(True)
-
-    full_model_ampl = FullModel(model_amplitude, filter_amplitude).to(device)
-    full_model_phase = FullModel(model_phase, filter_phase).to(device)
+    full_model_ampl.requires_grad_(True)
+    full_model_phase.requires_grad_(True)
     return full_model_ampl, full_model_phase
 
 
@@ -195,17 +202,17 @@ for fold in range(k):
     print(f"Fold {fold_num}: Train {len(train_idx)} samples | Val {len(val_idx)} samples")
 
     # Reset models and reload base weights for this fold
-    full_model_ampl, full_model_phase = build_full_models()
+    full_model_ampl, full_model_phase = build_full_models(args.checkpoint_ampl, args.checkpoint_phase)
 
     loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3)
     loss_fn_phase = nn.SmoothL1Loss(beta=1e-3)
 
     opt_fn_amplitude = opt_add.SOAP(
-        full_model_ampl.parameters(), lr=3e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+        full_model_ampl.parameters(), lr=args.lr, betas=(0.95, 0.999), shampoo_beta=0.99,
         weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
     )
     opt_fn_phase = opt_add.SOAP(
-        full_model_phase.parameters(), lr=3e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+        full_model_phase.parameters(), lr=args.lr, betas=(0.95, 0.999), shampoo_beta=0.99,
         weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
     )
 
@@ -395,7 +402,7 @@ print(f"\nEvaluating Best Fold (Fold {best_fold_idx}) on the held-out test set (
 best_fold_ampl_path = f"{title}_fold{best_fold_idx}_amplitude_best.pt"
 best_fold_phase_path = f"{title}_fold{best_fold_idx}_phase_best.pt"
 
-eval_model_ampl, eval_model_phase = build_full_models()
+eval_model_ampl, eval_model_phase = build_full_models(args.checkpoint_ampl, args.checkpoint_phase)
 eval_model_ampl.load_state_dict(torch.load(best_fold_ampl_path, map_location=device))
 eval_model_phase.load_state_dict(torch.load(best_fold_phase_path, map_location=device))
 eval_model_ampl.eval()

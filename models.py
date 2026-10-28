@@ -252,3 +252,17 @@ class SimplestMapper(nn.Module):
         return self.fc3(x)         
 
 
+class FullModel(nn.Module):
+    def __init__(self, mapper: nn.Module, decoder: nn.Module):
+        super().__init__()
+        self.mapper = mapper
+        self.decoder = decoder
+
+    def forward(self, x):
+        z = self.mapper(x)
+        out = self.decoder(z)
+        if out.ndim == 3 and out.size(1) == 1:
+            out = out.squeeze(1)
+        return out
+
+
