@@ -57,7 +57,7 @@ parser.add_argument(
     default="model_weights/soapFull2110-2610_phase_best.pt",
     help="Path to pretrained phase FullModel checkpoint (default: model_weights/soapFull2110-2610_phase_best.pt)",
 )
-parser.add_argument("--epochs", type=int, default=3000, help="Number of training epochs per fold (default: 500)")
+parser.add_argument("--epochs", type=int, default=2000, help="Number of training epochs per fold (default: 500)")
 parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate for finetuning (default: 3e-3)")
 parser.add_argument("--early_stop", type=int, default=0, help="Early stopping patience in epochs (default: 100, 0 to disable)")
 args = parser.parse_args()
@@ -408,6 +408,22 @@ eval_model_phase.load_state_dict(torch.load(best_fold_phase_path, map_location=d
 eval_model_ampl.eval()
 eval_model_phase.eval()
 
+# Save single definitive winning model
+best_ampl_out = f"{title}_amplitude_best.pt"
+best_phase_out = f"{title}_phase_best.pt"
+torch.save(eval_model_ampl.state_dict(), best_ampl_out)
+torch.save(eval_model_phase.state_dict(), best_phase_out)
+print(f"\nSaved single best model (from Fold {best_fold_idx}):")
+print(f"  - {best_ampl_out}")
+print(f"  - {best_phase_out}")
+
+# Clean up intermediate fold .pt files so only 1 model is retained
+for f_idx in range(1, k + 1):
+    for suffix in ["_amplitude_best.pt", "_amplitude_checkpoint.pt", "_phase_best.pt", "_phase_checkpoint.pt"]:
+        fold_ckpt = f"{title}_fold{f_idx}{suffix}"
+        if os.path.exists(fold_ckpt):
+            os.remove(fold_ckpt)
+
 mismatches = []
 with torch.no_grad():
     for b_params, b_ampl, b_phase in test_loader:
@@ -437,5 +453,7 @@ plot_mismatch_distribution(
 print(f"\n=== Final Held-Out Test Set Mismatch Stats (Fold {best_fold_idx}) ===")
 print(f"  Median: {np.median(mismatches):.2e} | Mean: {np.mean(mismatches):.2e} | Max: {np.max(mismatches):.2e}")
 print(f"Artifacts saved:")
-print(f"  - CV Summary CSV:  {title}_cv_summary.csv")
-print(f"  - Test Mismatch:   {plot_mismatch_filename}")
+print(f"  - Best Amplitude Model: {best_ampl_out}")
+print(f"  - Best Phase Model:     {best_phase_out}")
+print(f"  - CV Summary CSV:       {title}_cv_summary.csv")
+print(f"  - Test Mismatch:        {plot_mismatch_filename}")
