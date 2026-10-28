@@ -48,18 +48,21 @@ parser.add_argument("--title", type=str, default=None, help="Title / prefix for 
 parser.add_argument(
     "--checkpoint_ampl",
     type=str,
-    default="model_weights/soapFull1910-2610_amplitude_best.pt",
-    help="Path to pretrained amplitude FullModel checkpoint (default: model_weights/soapFull1910-2610_amplitude_best.pt)",
+    default="model_weights/train2full_amplitude_best.pt",
+    help="Path to pretrained amplitude FullModel checkpoint (default: model_weights/train2full_amplitude_best.pt)",
 )
 parser.add_argument(
     "--checkpoint_phase",
     type=str,
-    default="model_weights/soapFull1910-2610_phase_best.pt",
-    help="Path to pretrained phase FullModel checkpoint (default: model_weights/soapFull1910-2610_phase_best.pt)",
+    default="model_weights/train2full_phase_best.pt",
+    help="Path to pretrained phase FullModel checkpoint (default: model_weights/train2full_phase_best.pt)",
 )
-parser.add_argument("--epochs", type=int, default=3000, help="Number of training epochs per fold (default: 500)")
-parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate for finetuning (default: 3e-3)")
-parser.add_argument("--early_stop", type=int, default=0, help="Early stopping patience in epochs (default: 100, 0 to disable)")
+parser.add_argument("--epochs", type=int, default=2000, help="Total training epochs per fold (default: 2000)")
+parser.add_argument("--stage_a_epochs", type=int, default=500, help="Epochs for Stage A (frozen decoder, mapper only) (default: 500)")
+parser.add_argument("--lr_mapper", type=float, default=1e-3, help="Learning rate for mapper in Stage A (default: 1e-3)")
+parser.add_argument("--lr_joint_mapper", type=float, default=1e-4, help="Learning rate for mapper in Stage B (default: 1e-4)")
+parser.add_argument("--lr_decoder", type=float, default=1e-5, help="Learning rate for decoder in Stage B (default: 1e-5)")
+parser.add_argument("--early_stop", type=int, default=100, help="Early stopping patience in epochs during Stage B (default: 100, 0 to disable)")
 args = parser.parse_args()
 
 title = args.title
@@ -71,7 +74,7 @@ if not title:
     if not title:
         title = f"Finetune_SOAP_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-print(f"=== Starting 5-Fold Finetuning Run: {title} | Epochs/fold: {args.epochs} | Scheduler: ReduceLROnPlateau ===")
+print(f"=== Starting 5-Fold Finetuning Run: {title} | Total Epochs: {args.epochs} (Stage A: {args.stage_a_epochs}, Stage B: {max(0, args.epochs - args.stage_a_epochs)}) ===")
 
 
 def load_checkpoint_weights(model: FullModel, ckpt_path: str):
@@ -108,9 +111,6 @@ def build_full_models(checkpoint_ampl: str, checkpoint_phase: str):
 
     load_checkpoint_weights(full_model_ampl, checkpoint_ampl)
     load_checkpoint_weights(full_model_phase, checkpoint_phase)
-
-    full_model_ampl.requires_grad_(True)
-    full_model_phase.requires_grad_(True)
     return full_model_ampl, full_model_phase
 
 
@@ -207,28 +207,54 @@ for fold in range(k):
     loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3)
     loss_fn_phase = nn.SmoothL1Loss(beta=1e-3)
 
-    opt_fn_amplitude = opt_add.SOAP(
-        full_model_ampl.parameters(), lr=args.lr, betas=(0.95, 0.999), shampoo_beta=0.99,
-        weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
-    )
-    opt_fn_phase = opt_add.SOAP(
-        full_model_phase.parameters(), lr=args.lr, betas=(0.95, 0.999), shampoo_beta=0.99,
-        weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
-    )
+    # Stage A vs Stage B Setup
+    if args.stage_a_epochs > 0:
+        current_stage = "A"
+        full_model_ampl.decoder.requires_grad_(False)
+        full_model_phase.decoder.requires_grad_(False)
+        full_model_ampl.mapper.requires_grad_(True)
+        full_model_phase.mapper.requires_grad_(True)
+
+        opt_fn_amplitude = opt_add.SOAP(
+            full_model_ampl.mapper.parameters(), lr=args.lr_mapper, betas=(0.95, 0.999), shampoo_beta=0.99,
+            weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
+        )
+        opt_fn_phase = opt_add.SOAP(
+            full_model_phase.mapper.parameters(), lr=args.lr_mapper, betas=(0.95, 0.999), shampoo_beta=0.99,
+            weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001
+        )
+        print(f"[Fold {fold_num}] Starting Stage A: Decoder frozen, optimizing mapper only (lr={args.lr_mapper})")
+    else:
+        current_stage = "B"
+        full_model_ampl.decoder.requires_grad_(True)
+        full_model_phase.decoder.requires_grad_(True)
+        full_model_ampl.mapper.requires_grad_(True)
+        full_model_phase.mapper.requires_grad_(True)
+
+        opt_fn_amplitude = opt_add.SOAP([
+            {"params": full_model_ampl.mapper.parameters(), "lr": args.lr_joint_mapper},
+            {"params": full_model_ampl.decoder.parameters(), "lr": args.lr_decoder},
+        ], betas=(0.95, 0.999), shampoo_beta=0.99, weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001)
+
+        opt_fn_phase = opt_add.SOAP([
+            {"params": full_model_phase.mapper.parameters(), "lr": args.lr_joint_mapper},
+            {"params": full_model_phase.decoder.parameters(), "lr": args.lr_decoder},
+        ], betas=(0.95, 0.999), shampoo_beta=0.99, weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001)
+        print(f"[Fold {fold_num}] Starting Stage B directly: Joint training (mapper_lr={args.lr_joint_mapper}, decoder_lr={args.lr_decoder})")
 
     scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
-        opt_fn_amplitude, factor=0.5, patience=50, threshold=0.0001, threshold_mode="rel", min_lr=1e-6, cooldown=25
+        opt_fn_amplitude, factor=0.5, patience=50, threshold=0.0001, threshold_mode="rel", min_lr=1e-7, cooldown=25
     )
     scheduler_phase = lr_scheduler.ReduceLROnPlateau(
-        opt_fn_phase, factor=0.5, patience=50, threshold=0.0001, threshold_mode="rel", min_lr=1e-6, cooldown=25
+        opt_fn_phase, factor=0.5, patience=50, threshold=0.0001, threshold_mode="rel", min_lr=1e-7, cooldown=25
     )
 
     if args.early_stop > 0:
         early_stop_amplitude = EarlyStopping(
-            patience=args.early_stop, threshold=0.0001, mode="rel", min_lr=1e-6, patience_at_min_lr=50
+            patience=args.early_stop, threshold=0.0001, mode="rel", min_lr=1e-7, patience_at_min_lr=50
         )
         early_stop_phase = EarlyStopping(
-            patience=args.early_stop, threshold=0.0001, mode="rel", min_lr=1e-6, patience_at_min_lr=50
+            patience=args.early_stop, threshold=0.0001, mode="rel", min_lr=1e-7, patience_at_min_lr=50
         )
 
     best_vloss_amplitude = float("inf")
@@ -236,6 +262,7 @@ for fold in range(k):
 
     history = {
         "epoch": [],
+        "stage": [],
         "train_loss_amplitude": [],
         "val_loss_amplitude": [],
         "lr_amplitude": [],
@@ -246,6 +273,30 @@ for fold in range(k):
 
     # Epoch training loop
     for epoch in range(args.epochs):
+        # Transition from Stage A to Stage B
+        if args.stage_a_epochs > 0 and epoch == args.stage_a_epochs:
+            current_stage = "B"
+            print(f"\n[Fold {fold_num}] >>> Epoch {epoch + 1}: Unfreezing Decoder for Stage B (Mapper LR: {args.lr_joint_mapper}, Decoder LR: {args.lr_decoder}) <<<")
+            full_model_ampl.decoder.requires_grad_(True)
+            full_model_phase.decoder.requires_grad_(True)
+
+            opt_fn_amplitude = opt_add.SOAP([
+                {"params": full_model_ampl.mapper.parameters(), "lr": args.lr_joint_mapper},
+                {"params": full_model_ampl.decoder.parameters(), "lr": args.lr_decoder},
+            ], betas=(0.95, 0.999), shampoo_beta=0.99, weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001)
+
+            opt_fn_phase = opt_add.SOAP([
+                {"params": full_model_phase.mapper.parameters(), "lr": args.lr_joint_mapper},
+                {"params": full_model_phase.decoder.parameters(), "lr": args.lr_decoder},
+            ], betas=(0.95, 0.999), shampoo_beta=0.99, weight_decay=0, precondition_frequency=25, merge_dims=False, eps=0.0001)
+
+            scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
+                opt_fn_amplitude, factor=0.5, patience=50, threshold=0.0001, threshold_mode="rel", min_lr=1e-7, cooldown=25
+            )
+            scheduler_phase = lr_scheduler.ReduceLROnPlateau(
+                opt_fn_phase, factor=0.5, patience=50, threshold=0.0001, threshold_mode="rel", min_lr=1e-7, cooldown=25
+            )
+
         # 1. Train Step
         full_model_ampl.train(True)
         full_model_phase.train(True)
@@ -307,6 +358,7 @@ for fold in range(k):
         current_lr_ph = scheduler_phase.get_last_lr()[0]
 
         history["epoch"].append(epoch + 1)
+        history["stage"].append(current_stage)
         history["train_loss_amplitude"].append(total_loss_amplitudeT)
         history["val_loss_amplitude"].append(total_loss_amplitudeV)
         history["lr_amplitude"].append(current_lr_ampl)
@@ -321,6 +373,7 @@ for fold in range(k):
             torch.save(
                 {
                     "epoch": epoch + 1,
+                    "stage": current_stage,
                     "model_state_dict": full_model_ampl.state_dict(),
                     "optimizer_state_dict": opt_fn_amplitude.state_dict(),
                     "scheduler_state_dict": scheduler_amplitude.state_dict(),
@@ -335,6 +388,7 @@ for fold in range(k):
             torch.save(
                 {
                     "epoch": epoch + 1,
+                    "stage": current_stage,
                     "model_state_dict": full_model_phase.state_dict(),
                     "optimizer_state_dict": opt_fn_phase.state_dict(),
                     "scheduler_state_dict": scheduler_phase.state_dict(),
@@ -343,8 +397,8 @@ for fold in range(k):
                 f"{fold_title}_phase_checkpoint.pt",
             )
 
-        # 5. Early Stopping Check
-        if args.early_stop > 0:
+        # 5. Early Stopping Check (active only during Stage B)
+        if args.early_stop > 0 and epoch >= args.stage_a_epochs:
             stop_a = early_stop_amplitude.step(total_loss_amplitudeV, current_lr_ampl)
             stop_p = early_stop_phase.step(total_loss_phaseV, current_lr_ph)
             if stop_a and stop_p:

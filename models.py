@@ -252,6 +252,38 @@ class SimplestMapper(nn.Module):
         return self.fc3(x)         
 
 
+class BiggerMapper(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(in_features=3, out_features=16)
+        self.fc2 = nn.Linear(in_features=16, out_features=64)
+        self.fc3 = nn.Linear(in_features=64, out_features=96)
+        self.fc4 = nn.Linear(in_features=96, out_features=64)
+        self.act = nn.GELU()
+    
+    def forward(self,x):
+        x = self.act(self.fc1(x))
+        x = self.act(self.fc2(x))
+        x = self.act(self.fc3(x))
+        return self.fc4(x) 
+
+
+class BiggestMapper(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(in_features=3, out_features=32)
+        self.fc2 = nn.Linear(in_features=32, out_features=128)
+        self.fc3 = nn.Linear(in_features=128, out_features=256)
+        self.fc4 = nn.Linear(in_features=256, out_features=64)
+        self.act = nn.GELU()
+    
+    def forward(self,x):
+        x = self.act(self.fc1(x))
+        x = self.act(self.fc2(x))
+        x = self.act(self.fc3(x))
+        return self.fc4(x)   
+
+
 class FullModel(nn.Module):
     def __init__(self, mapper: nn.Module, decoder: nn.Module):
         super().__init__()
@@ -264,5 +296,9 @@ class FullModel(nn.Module):
         if out.ndim == 3 and out.size(1) == 1:
             out = out.squeeze(1)
         return out
+
+
+
+
 
 
