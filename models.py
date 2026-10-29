@@ -271,9 +271,9 @@ class BiggerMapper(nn.Module):
 class BiggestMapper(nn.Module):
     def __init__(self):
         super().__init__()
-        self.fc1 = nn.Linear(in_features=3, out_features=32)
-        self.fc2 = nn.Linear(in_features=32, out_features=128)
-        self.fc3 = nn.Linear(in_features=128, out_features=256)
+        self.fc1 = nn.Linear(in_features=3, out_features=64)
+        self.fc2 = nn.Linear(in_features=64, out_features=256)
+        self.fc3 = nn.Linear(in_features=256, out_features=256)
         self.fc4 = nn.Linear(in_features=256, out_features=64)
         self.act = nn.GELU()
     
