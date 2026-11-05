@@ -17,7 +17,7 @@ torch.backends.cudnn.allow_tf32 = False
 
 
 
-from models import Autoencoder3, Autoencoder_CNN_NOBN
+from models import Autoencoder_CNN_NOBN
 from utils import (
     get_phase,
     train_one_epoch,
@@ -31,13 +31,13 @@ from utils import (
 # ---------------------------------------------------------------------------
 # CLI Arguments
 # ---------------------------------------------------------------------------
-parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Phase (NRHybSur3dq8)")
+parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Phase (NRSur7dq4)")
 parser.add_argument("--title", type=str, default=None, help="Title / prefix for this run (used in output filenames)")
-parser.add_argument("--model", type=str, choices=["autoencoder3", "autoencoder_cnn_nobn", "nobn"], default="nobn", help="Architecture: 'autoencoder3' (GroupNorm) or 'autoencoder_cnn_nobn'/'nobn' (No BatchNorm) (default: nobn)")
-parser.add_argument("--opt", type=str, choices=["adam", "soap"], default="soap", help="Optimizer choice: 'adam' or 'soap' (default: soap)")
-parser.add_argument("--scheduler", type=str, choices=["plateau", "cosine"], default="plateau", help="LR scheduler choice: 'plateau' or 'cosine' (default: plateau)")
-parser.add_argument("--epochs", type=int, default=5000, help="Number of training epochs (default: 3000)")
-parser.add_argument("--early_stop", type=int, default=400, help="Early stopping patience in epochs (default: 100, set 0 to disable)")
+parser.add_argument("--model", type=str, choices=["nobn"], default="nobn", help="Architecture: 'autoencoder_cnn_nobn'/'nobn' (No BatchNorm) (default: nobn)")
+parser.add_argument("--opt", type=str, choices=["soap"], default="soap", help="Optimizer choice: 'soap' (default: soap)")
+parser.add_argument("--scheduler", type=str, choices=["plateau"], default="plateau", help="LR scheduler choice: 'plateau' (default: plateau)")
+parser.add_argument("--epochs", type=int, default=5000, help="Number of training epochs (default: 5000)")
+parser.add_argument("--early_stop", type=int, default=400, help="Early stopping patience in epochs (default: 400, set 0 to disable)")
 args = parser.parse_args()
 
 title = args.title
@@ -49,7 +49,7 @@ if not title:
     if not title:
         title = f"AE_{args.opt}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-model_name = "Autoencoder3 (GroupNorm)" if args.model.lower() == "autoencoder3" else "Autoencoder_CNN_NOBN"
+model_name = "Autoencoder_CNN_NOBN"
 print(f"=== Starting Run: {title} | Model: {model_name} | Optimizer: {args.opt.upper()} | Scheduler: {args.scheduler.upper()} | Epochs: {args.epochs} ===")
 
 # ---------------------------------------------------------------------------
@@ -65,11 +65,10 @@ else:
 # ---------------------------------------------------------------------------
 # Load Dataset from HDF5
 # ---------------------------------------------------------------------------
-filepath = (
-    "datasets/NRHybSur3dq8_dataset.hdf"
-    if os.path.exists("datasets/NRHybSur3dq8_dataset.hdf")
-    else "/lustre/ific.uv.es/ml/uv098/osvaldogramaxo/DANSur_22/data/NRHybSur3dq8_dataset.hdf"
-)
+filepath = "datasets/NRSur7dq4v2_dataset.hdf"
+
+if not os.path.exists(filepath):
+    raise FileNotFoundError(f"Dataset not found at '{filepath}'")
 
 with h5py.File(filepath, "r") as f:
     waveforms_ds = f["Waveforms"]
@@ -105,12 +104,9 @@ p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 # ---------------------------------------------------------------------------
 # Models, Loss Functions & Regularization
 # ---------------------------------------------------------------------------
-if args.model.lower() == "autoencoder3":
-    model_amplitude = Autoencoder3().to(device)
-    model_phase = Autoencoder3().to(device)
-else:
-    model_amplitude = Autoencoder_CNN_NOBN().to(device)
-    model_phase = Autoencoder_CNN_NOBN().to(device)
+
+model_amplitude = Autoencoder_CNN_NOBN().to(device)
+model_phase = Autoencoder_CNN_NOBN().to(device)
 
 # Dedicated per-branch losses
 loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3) #L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
@@ -134,27 +130,13 @@ else:
     opt_fn_amplitude = AdamW(model_amplitude.parameters(), lr=4e-3, weight_decay=0)
     opt_fn_phase = AdamW(model_phase.parameters(), lr=4e-3, weight_decay=0)
 
-if args.scheduler == "cosine":
-    scheduler_amplitude = lr_scheduler.CosineAnnealingLR(
-        opt_fn_amplitude, T_max=args.epochs, eta_min=5e-7
-    )
-    scheduler_phase = lr_scheduler.CosineAnnealingLR(
-        opt_fn_phase, T_max=args.epochs, eta_min=5e-7
-    )
-elif args.opt.lower() == "soap":
-    scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
-        opt_fn_amplitude, factor=0.5, patience=150, threshold=0.0001, threshold_mode="rel", min_lr=5e-7, cooldown=50
-    )
-    scheduler_phase = lr_scheduler.ReduceLROnPlateau(
-        opt_fn_phase, factor=0.5, patience=150, threshold=0.0001, threshold_mode="rel", min_lr=5e-7, cooldown=50
-    )
-else:
-    scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
-        opt_fn_amplitude, factor=0.5, patience=200, threshold=0.0001, threshold_mode="rel", min_lr=1e-6, cooldown=50
-    )
-    scheduler_phase = lr_scheduler.ReduceLROnPlateau(
-        opt_fn_phase, factor=0.5, patience=200, threshold=0.0001, threshold_mode="rel", min_lr=1e-6, cooldown=50
-    )
+
+scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
+    opt_fn_amplitude, factor=0.5, patience=150, threshold=0.0001, threshold_mode="rel", min_lr=5e-7, cooldown=50
+)
+scheduler_phase = lr_scheduler.ReduceLROnPlateau(
+    opt_fn_phase, factor=0.5, patience=150, threshold=0.0001, threshold_mode="rel", min_lr=5e-7, cooldown=50
+)
 
 # ---------------------------------------------------------------------------
 # Training Loop

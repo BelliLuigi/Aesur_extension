@@ -50,3 +50,11 @@
         - Training is going good both of Definitive AE and PRE-Full
         - Added finetune executable.
         
+    - 28/10
+        - Reproducing AeSur3dq8 is done.
+        - I discovered that i could try with post processing and Gerchberg-Saxton, CMA-ES,
+    - 4/11 
+        - Reading papers, talked w/ Tasos -> new roadmap:
+             - Make 7d dataset w/uniform sampling w/ Inertial and Coorbital WF, quaternion and phase and params obv.
+	     - Try Inertial frame AE first, to see if AE is expressive enough to do that.
+             - Try then piecewise encoder w/quaternions, orbital phase and coorbital frames.
