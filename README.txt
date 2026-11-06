@@ -58,3 +58,9 @@
              - Make 7d dataset w/uniform sampling w/ Inertial and Coorbital WF, quaternion and phase and params obv.
 	     - Try Inertial frame AE first, to see if AE is expressive enough to do that.
              - Try then piecewise encoder w/quaternions, orbital phase and coorbital frames.
+    - 6/11
+        - Done Dataset using NRSur7dq4v2. There is a technical sheet to describe it. It has inertial wf, quats, orbphase, params. Not coorbital wfs bc otherwise got too big. Can be added though.
+        - Launched 2 AE training on NEW dataset: 1 in float 32, one in float64, everything else is the same.
+        - added torch compile to training, hope it can help w/speed.
+        - Making Purrer et all slideshow.
+        - Also trying logfreq.
