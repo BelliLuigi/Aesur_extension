@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 from datetime import datetime
 import h5py
 import numpy as np
@@ -109,9 +110,19 @@ raw_model_amplitude = Autoencoder_CNN_NOBN().to(device).double()
 raw_model_phase = Autoencoder_CNN_NOBN().to(device).double()
 
 if args.compile:
-    print("Compiling 64-bit models with torch.compile...")
-    model_amplitude = torch.compile(raw_model_amplitude)
-    model_phase = torch.compile(raw_model_phase)
+    if sys.version_info >= (3, 13):
+        print("Notice: torch.compile/Dynamo is not supported on Python 3.13+. Continuing with uncompiled models.")
+        model_amplitude = raw_model_amplitude
+        model_phase = raw_model_phase
+    else:
+        try:
+            print("Compiling 64-bit models with torch.compile...")
+            model_amplitude = torch.compile(raw_model_amplitude)
+            model_phase = torch.compile(raw_model_phase)
+        except Exception as e:
+            print(f"Notice: torch.compile failed ({e}). Continuing with uncompiled models.")
+            model_amplitude = raw_model_amplitude
+            model_phase = raw_model_phase
 else:
     model_amplitude = raw_model_amplitude
     model_phase = raw_model_phase
