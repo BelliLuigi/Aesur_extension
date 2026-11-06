@@ -97,12 +97,13 @@ def get_conv_transpose1d_params(
 
 def train_one_epoch(model, optimizer, loss_fn, device, epoch_index, tb_writer, loader, lambda_latent: float = 0.0):
     model.train(True)
+    dtype = next(model.parameters()).dtype
     total_loss = 0.0
 
     for i, batch in enumerate(loader):
         if isinstance(batch, (list, tuple)):
             batch = batch[0]
-        inputs = batch.float().to(device)
+        inputs = batch.to(device=device, dtype=dtype)
         if inputs.ndim == 2:
             inputs = inputs.unsqueeze(1)
 
@@ -146,12 +147,13 @@ def validate(model, val_loader, loss_fn, device=None, lambda_latent: float = 0.0
     if device is None:
         device = next(model.parameters()).device
     model.eval()
+    dtype = next(model.parameters()).dtype
     running_vloss = 0.0
     with torch.no_grad():
         for i, vbatch in enumerate(val_loader):
             if isinstance(vbatch, (list, tuple)):
                 vbatch = vbatch[0]
-            vinputs = vbatch.float().to(device)
+            vinputs = vbatch.to(device=device, dtype=dtype)
             if vinputs.ndim == 2:
                 vinputs = vinputs.unsqueeze(1)
             if lambda_latent > 0.0:
@@ -190,14 +192,15 @@ def train_one_epoch_maesmatch(
     """
     model_amplitude.train(True)
     model_phase.train(True)
+    dtype = next(model_amplitude.parameters()).dtype
 
     total_ampl_loss = 0.0
     total_phase_loss = 0.0
     total_joint_loss = 0.0
 
     for i, (b_ampl, b_phase) in enumerate(loader):
-        b_ampl = b_ampl.float().to(device)
-        b_phase = b_phase.float().to(device)
+        b_ampl = b_ampl.to(device=device, dtype=dtype)
+        b_phase = b_phase.to(device=device, dtype=dtype)
         if b_ampl.ndim == 2:
             b_ampl = b_ampl.unsqueeze(1)
         if b_phase.ndim == 2:
@@ -274,6 +277,7 @@ def validate_maesmatch(
         device = next(model_amplitude.parameters()).device
     model_amplitude.eval()
     model_phase.eval()
+    dtype = next(model_amplitude.parameters()).dtype
 
     running_vloss_ampl = 0.0
     running_vloss_phase = 0.0
@@ -281,8 +285,8 @@ def validate_maesmatch(
 
     with torch.no_grad():
         for i, (vb_ampl, vb_phase) in enumerate(val_loader):
-            vb_ampl = vb_ampl.float().to(device)
-            vb_phase = vb_phase.float().to(device)
+            vb_ampl = vb_ampl.to(device=device, dtype=dtype)
+            vb_phase = vb_phase.to(device=device, dtype=dtype)
             if vb_ampl.ndim == 2:
                 vb_ampl = vb_ampl.unsqueeze(1)
             if vb_phase.ndim == 2:
@@ -459,12 +463,13 @@ def compute_mismatches(model_amplitude, model_phase, loader, device=None, norm: 
         device = next(model_amplitude.parameters()).device
     model_amplitude.eval()
     model_phase.eval()
+    dtype = next(model_amplitude.parameters()).dtype
 
     mismatches = []
     with torch.no_grad():
         for b_ampl, b_phase in loader:
-            b_ampl = b_ampl.float().to(device)
-            b_phase = b_phase.float().to(device)
+            b_ampl = b_ampl.to(device=device, dtype=dtype)
+            b_phase = b_phase.to(device=device, dtype=dtype)
             if b_ampl.ndim == 2:
                 b_ampl = b_ampl.unsqueeze(1)
             if b_phase.ndim == 2:
@@ -498,17 +503,18 @@ def plot_mismatch_distribution(mismatches, run_title: str, output_path: str):
 
     bins = np.logspace(-8, 0, 81)
     clipped_mismatches = np.clip(mismatches, 1e-8, 1.0)
-    ax.hist(clipped_mismatches, bins=bins, color="#2b5c8f", edgecolor="#173559", alpha=0.85)
+    counts, _, _ = ax.hist(clipped_mismatches, bins=bins, color="#2b5c8f", edgecolor="#173559", alpha=0.85)
 
     ax.set_xscale("log")
     ax.set_xlim(1e-8, 1.0)
-    ax.set_ylim(0, 4000)
+    max_count = int(np.max(counts)) if len(counts) > 0 else 0
+    ax.set_ylim(0, max(4000, int(max_count * 1.15)))
 
     ax.set_xlabel("Mismatch", fontsize=12, fontweight="bold")
     ax.set_ylabel("Count", fontsize=12, fontweight="bold")
     ax.set_title(
-        "Mismatch distributions for the model-generated waveforms\n"
-        "Left: distribution for the autoencoder reconstruction of the NRHybSur3dq8",
+        f"Mismatch distributions for the model-generated waveforms\n"
+        f"Distribution for the autoencoder reconstruction ({run_title})",
         fontsize=11,
         fontweight="bold",
         pad=12,
