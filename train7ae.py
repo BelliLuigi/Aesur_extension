@@ -38,6 +38,7 @@ parser.add_argument("--opt", type=str, choices=["soap"], default="soap", help="O
 parser.add_argument("--scheduler", type=str, choices=["plateau"], default="plateau", help="LR scheduler choice: 'plateau' (default: plateau)")
 parser.add_argument("--epochs", type=int, default=5000, help="Number of training epochs (default: 5000)")
 parser.add_argument("--early_stop", type=int, default=400, help="Early stopping patience in epochs (default: 400, set 0 to disable)")
+parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True, help="Enable torch.compile for model acceleration (default: True, use --no-compile to disable)")
 args = parser.parse_args()
 
 title = args.title
@@ -105,8 +106,16 @@ p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 # Models, Loss Functions & Regularization
 # ---------------------------------------------------------------------------
 
-model_amplitude = Autoencoder_CNN_NOBN().to(device)
-model_phase = Autoencoder_CNN_NOBN().to(device)
+raw_model_amplitude = Autoencoder_CNN_NOBN().to(device)
+raw_model_phase = Autoencoder_CNN_NOBN().to(device)
+
+if args.compile:
+    print("Compiling models with torch.compile...")
+    model_amplitude = torch.compile(raw_model_amplitude)
+    model_phase = torch.compile(raw_model_phase)
+else:
+    model_amplitude = raw_model_amplitude
+    model_phase = raw_model_phase
 
 # Dedicated per-branch losses
 loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3) #L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
@@ -204,11 +213,11 @@ for epoch in range(args.epochs):
     # Save best Amplitude model & optimizer state
     if avg_vloss_ampl < best_vloss_amplitude:
         best_vloss_amplitude = avg_vloss_ampl
-        torch.save(model_amplitude.state_dict(), f"{title}_amplitude_best.pt")
+        torch.save(raw_model_amplitude.state_dict(), f"{title}_amplitude_best.pt")
         torch.save(
             {
                 "epoch": epoch + 1,
-                "model_state_dict": model_amplitude.state_dict(),
+                "model_state_dict": raw_model_amplitude.state_dict(),
                 "optimizer_state_dict": opt_fn_amplitude.state_dict(),
                 "scheduler_state_dict": scheduler_amplitude.state_dict(),
                 "best_vloss": best_vloss_amplitude,
@@ -219,11 +228,11 @@ for epoch in range(args.epochs):
     # Save best Phase model & optimizer state
     if avg_vloss_ph < best_vloss_phase:
         best_vloss_phase = avg_vloss_ph
-        torch.save(model_phase.state_dict(), f"{title}_phase_best.pt")
+        torch.save(raw_model_phase.state_dict(), f"{title}_phase_best.pt")
         torch.save(
             {
                 "epoch": epoch + 1,
-                "model_state_dict": model_phase.state_dict(),
+                "model_state_dict": raw_model_phase.state_dict(),
                 "optimizer_state_dict": opt_fn_phase.state_dict(),
                 "scheduler_state_dict": scheduler_phase.state_dict(),
                 "best_vloss": best_vloss_phase,
@@ -289,8 +298,8 @@ best_ampl_path = f"{title}_amplitude_best.pt"
 best_phase_path = f"{title}_phase_best.pt"
 
 print(f"\nLoading best saved models for mismatch evaluation...")
-model_amplitude.load_state_dict(torch.load(best_ampl_path, map_location=device))
-model_phase.load_state_dict(torch.load(best_phase_path, map_location=device))
+raw_model_amplitude.load_state_dict(torch.load(best_ampl_path, map_location=device))
+raw_model_phase.load_state_dict(torch.load(best_phase_path, map_location=device))
 
 print("Computing test set waveform mismatches...")
 mismatches = compute_mismatches(model_amplitude, model_phase, test_loader, device=device)
