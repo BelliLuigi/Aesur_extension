@@ -101,21 +101,29 @@ def train_one_epoch(model, optimizer, loss_fn, device, epoch_index, tb_writer, l
     total_loss = 0.0
 
     for i, batch in enumerate(loader):
+        weights = None
         if isinstance(batch, (list, tuple)):
-            batch = batch[0]
-        inputs = batch.to(device=device, dtype=dtype)
+            if len(batch) > 1:
+                inputs, weights = batch[0], batch[1]
+                weights = weights.to(device=device, dtype=dtype)
+            else:
+                inputs = batch[0]
+        else:
+            inputs = batch
+        inputs = inputs.to(device=device, dtype=dtype)
         if inputs.ndim == 2:
             inputs = inputs.unsqueeze(1)
 
         optimizer.zero_grad()
         if lambda_latent > 0.0:
             outputs, z = model(inputs, return_latent=True)
-            recon_loss = loss_fn(outputs, inputs)
+            recon_loss = loss_fn(outputs, inputs, weights) if weights is not None else loss_fn(outputs, inputs)
             l2_latent_reg = torch.mean(z ** 2)
             loss = recon_loss + lambda_latent * l2_latent_reg
         else:
             outputs = model(inputs)
-            loss = loss_fn(outputs, inputs)
+            recon_loss = loss_fn(outputs, inputs, weights) if weights is not None else loss_fn(outputs, inputs)
+            loss = recon_loss
 
         loss.backward()
         optimizer.step()
@@ -126,6 +134,25 @@ def train_one_epoch(model, optimizer, loss_fn, device, epoch_index, tb_writer, l
             tb_writer.add_scalar("Loss/train", loss.item(), tb_x)
 
     return total_loss / max(len(loader), 1)
+
+
+class WeightedSmoothL1Loss(nn.Module):
+    """
+    Smooth L1 Loss supporting optional sample-level weights.
+    Averages over the time/spatial dimensions first, then weights across the batch.
+    """
+    def __init__(self, beta: float = 1e-3):
+        super().__init__()
+        self.beta = beta
+        self.loss_fn = nn.SmoothL1Loss(beta=beta, reduction="none")
+
+    def forward(self, pred, target, weights=None):
+        elem_loss = self.loss_fn(pred, target)
+        sample_loss = elem_loss.mean(dim=[-2, -1] if elem_loss.ndim == 3 else -1)
+        if weights is not None:
+            weights = weights.view_as(sample_loss)
+            return torch.mean(sample_loss * weights)
+        return torch.mean(sample_loss)
 
 
 class L1WeightLoss(nn.Module):
@@ -151,17 +178,25 @@ def validate(model, val_loader, loss_fn, device=None, lambda_latent: float = 0.0
     running_vloss = 0.0
     with torch.no_grad():
         for i, vbatch in enumerate(val_loader):
+            weights = None
             if isinstance(vbatch, (list, tuple)):
-                vbatch = vbatch[0]
-            vinputs = vbatch.to(device=device, dtype=dtype)
+                if len(vbatch) > 1:
+                    vinputs, weights = vbatch[0], vbatch[1]
+                    weights = weights.to(device=device, dtype=dtype)
+                else:
+                    vinputs = vbatch[0]
+            else:
+                vinputs = vbatch
+            vinputs = vinputs.to(device=device, dtype=dtype)
             if vinputs.ndim == 2:
                 vinputs = vinputs.unsqueeze(1)
             if lambda_latent > 0.0:
                 voutputs, z = model(vinputs, return_latent=True)
-                vloss = loss_fn(voutputs, vinputs) + lambda_latent * torch.mean(z ** 2)
+                recon_loss = loss_fn(voutputs, vinputs, weights) if weights is not None else loss_fn(voutputs, vinputs)
+                vloss = recon_loss + lambda_latent * torch.mean(z ** 2)
             else:
                 voutputs = model(vinputs)
-                vloss = loss_fn(voutputs, vinputs)
+                vloss = loss_fn(voutputs, vinputs, weights) if weights is not None else loss_fn(voutputs, vinputs)
             running_vloss += vloss.item()
     return running_vloss / max(len(val_loader), 1)
 
@@ -549,10 +584,10 @@ class EarlyStopping:
     """
     def __init__(
         self,
-        patience: int = 400,
-        threshold: float = 1e-4,
+        patience: int = 100,
+        threshold: float = 0.005,
         min_lr: float = 5e-7,
-        patience_at_min_lr: int = 150,
+        patience_at_min_lr: int = 50,
         mode: str = "rel",
         divergence_factor: float = 100.0,
         patience_divergence: int = 5,

@@ -30,16 +30,12 @@ from utils import (
 )
 
 # ---------------------------------------------------------------------------
-# CLI Arguments
+# CLI Arguments (Minimal Execution Controls)
 # ---------------------------------------------------------------------------
-parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Phase (NRSur7dq4)")
-parser.add_argument("--title", type=str, default=None, help="Title / prefix for this run (used in output filenames)")
-parser.add_argument("--model", type=str, choices=["nobn"], default="nobn", help="Architecture: 'autoencoder_cnn_nobn'/'nobn' (No BatchNorm) (default: nobn)")
-parser.add_argument("--opt", type=str, choices=["soap"], default="soap", help="Optimizer choice: 'soap' (default: soap)")
-parser.add_argument("--scheduler", type=str, choices=["plateau"], default="plateau", help="LR scheduler choice: 'plateau' (default: plateau)")
-parser.add_argument("--epochs", type=int, default=5000, help="Number of training epochs (default: 5000)")
-parser.add_argument("--early_stop", type=int, default=400, help="Early stopping patience in epochs (default: 400, set 0 to disable)")
-parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=True, help="Enable torch.compile for model acceleration (default: True, use --no-compile to disable)")
+parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Phase (SOAP)")
+parser.add_argument("--title", type=str, default=None, help="Run title / prefix for output files")
+parser.add_argument("--epochs", type=int, default=5000, help="Training epochs (default: 5000)")
+parser.add_argument("--early_stop", type=int, default=300, help="Early stopping patience in epochs (default: 300, 0 to disable)")
 args = parser.parse_args()
 
 title = args.title
@@ -49,10 +45,10 @@ if not title:
     except EOFError:
         title = ""
     if not title:
-        title = f"AE_{args.opt}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        title = f"AE_soap_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 model_name = "Autoencoder_CNN_NOBN"
-print(f"=== Starting Run: {title} | Model: {model_name} | Optimizer: {args.opt.upper()} | Scheduler: {args.scheduler.upper()} | Epochs: {args.epochs} ===")
+print(f"=== Starting Run: {title} | Model: {model_name} | Optimizer: SOAP | Scheduler: PLATEAU | Epochs: {args.epochs} ===")
 
 # ---------------------------------------------------------------------------
 # Device Configuration
@@ -97,9 +93,9 @@ a_val   = Subset(ampl_tensor, j_val.indices)
 p_val   = Subset(phase_tensor, j_val.indices)
 
 test_loader = DataLoader(j_test, batch_size=1024, shuffle=False)
-a_train_loader = DataLoader(a_train, batch_size=64, shuffle=True)
+a_train_loader = DataLoader(a_train, batch_size=128, shuffle=True)
 a_val_loader = DataLoader(a_val, batch_size=2048, shuffle=False)
-p_train_loader = DataLoader(p_train, batch_size=64, shuffle=True)
+p_train_loader = DataLoader(p_train, batch_size=128, shuffle=True)
 p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 
 
@@ -110,52 +106,43 @@ p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 raw_model_amplitude = Autoencoder_CNN_NOBN().to(device)
 raw_model_phase = Autoencoder_CNN_NOBN().to(device)
 
-if args.compile:
-    if sys.version_info >= (3, 13):
-        print("Notice: torch.compile/Dynamo is not supported on Python 3.13+. Continuing with uncompiled models.")
-        model_amplitude = raw_model_amplitude
-        model_phase = raw_model_phase
-    else:
-        try:
-            print("Compiling models with torch.compile...")
-            model_amplitude = torch.compile(raw_model_amplitude)
-            model_phase = torch.compile(raw_model_phase)
-        except Exception as e:
-            print(f"Notice: torch.compile failed ({e}). Continuing with uncompiled models.")
-            model_amplitude = raw_model_amplitude
-            model_phase = raw_model_phase
-else:
+if sys.version_info >= (3, 13):
+    print("Notice: torch.compile/Dynamo is not supported on Python 3.13+. Continuing with uncompiled models.")
     model_amplitude = raw_model_amplitude
     model_phase = raw_model_phase
+else:
+    try:
+        print("Compiling models with torch.compile...")
+        model_amplitude = torch.compile(raw_model_amplitude)
+        model_phase = torch.compile(raw_model_phase)
+    except Exception as e:
+        print(f"Notice: torch.compile failed ({e}). Continuing with uncompiled models.")
+        model_amplitude = raw_model_amplitude
+        model_phase = raw_model_phase
 
 # Dedicated per-branch losses
-loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3) #L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
-loss_fn_phase = nn.SmoothL1Loss(beta=1e-3) #L1WeightLoss(w=5.0, start_window=1700, end_window=2048).to(device)
+loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3)
+loss_fn_phase = nn.SmoothL1Loss(beta=1e-3)
 
-lambda_latent = 1e-5
+lambda_latent = 1e-6
 
 # ---------------------------------------------------------------------------
-# Optimizers & Schedulers
+# Optimizers (Hardcoded SOAP) & Schedulers (Hardcoded Plateau)
 # ---------------------------------------------------------------------------
-if args.opt.lower() == "soap":
-    opt_fn_amplitude = opt_add.SOAP(
-        model_amplitude.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
-        weight_decay=1e-9, precondition_frequency=25, merge_dims=False, eps=0.0001
-    )
-    opt_fn_phase = opt_add.SOAP(
-        model_phase.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
-        weight_decay=1e-9, precondition_frequency=25, merge_dims=False, eps=0.0001
-    )
-else:
-    opt_fn_amplitude = AdamW(model_amplitude.parameters(), lr=4e-3, weight_decay=0)
-    opt_fn_phase = AdamW(model_phase.parameters(), lr=4e-3, weight_decay=0)
-
+opt_fn_amplitude = opt_add.SOAP(
+    model_amplitude.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+    weight_decay=0.0, precondition_frequency=25, merge_dims=False, eps=0.0001
+)
+opt_fn_phase = opt_add.SOAP(
+    model_phase.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+    weight_decay=0.0, precondition_frequency=25, merge_dims=False, eps=0.0001
+)
 
 scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
-    opt_fn_amplitude, factor=0.5, patience=150, threshold=0.0001, threshold_mode="rel", min_lr=5e-7, cooldown=50
+    opt_fn_amplitude, factor=0.5, patience=50, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=20
 )
 scheduler_phase = lr_scheduler.ReduceLROnPlateau(
-    opt_fn_phase, factor=0.5, patience=150, threshold=0.0001, threshold_mode="rel", min_lr=5e-7, cooldown=50
+    opt_fn_phase, factor=0.5, patience=50, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=20
 )
 
 # ---------------------------------------------------------------------------
@@ -175,15 +162,18 @@ history = {
 }
 
 # Early Stopping Initialization
+stopped_amplitude = False
+stopped_phase = False
+
 if args.early_stop > 0:
-    min_lr_target = 5e-7 if args.opt.lower() == "soap" else 1e-6
+    min_lr_target = 5e-7 
     early_stop_amplitude = EarlyStopping(
-        patience=args.early_stop, threshold=0.0001, mode="rel", min_lr=min_lr_target, patience_at_min_lr=150
+        patience=args.early_stop, threshold=0.001, mode="rel", min_lr=min_lr_target, patience_at_min_lr=50
     )
     early_stop_phase = EarlyStopping(
-        patience=args.early_stop, threshold=0.0001, mode="rel", min_lr=min_lr_target, patience_at_min_lr=150
+        patience=args.early_stop, threshold=0.001, mode="rel", min_lr=min_lr_target, patience_at_min_lr=50
     )
-    print(f"Early stopping enabled: global_patience={args.early_stop}, floor_patience=150 at min_lr={min_lr_target:.1e} (rel threshold=0.01%)")
+    print(f"Early stopping enabled: global_patience={args.early_stop}, floor_patience=50 at min_lr={min_lr_target:.1e} (rel threshold=0.5%)")
 else:
     print("Early stopping disabled.")
 
@@ -202,12 +192,8 @@ for epoch in range(args.epochs):
     avg_vloss_ph = validate(model_phase, p_val_loader, loss_fn_phase, device=device, lambda_latent=lambda_latent)
 
     # Step LR Scheduler
-    if args.scheduler == "plateau":
-        scheduler_amplitude.step(avg_vloss_ampl)
-        scheduler_phase.step(avg_vloss_ph)
-    else:
-        scheduler_amplitude.step()
-        scheduler_phase.step()
+    scheduler_amplitude.step(avg_vloss_ampl)
+    scheduler_phase.step(avg_vloss_ph)
 
     current_lr_ampl = scheduler_amplitude.get_last_lr()[0]
     current_lr_ph = scheduler_phase.get_last_lr()[0]
@@ -258,9 +244,12 @@ for epoch in range(args.epochs):
 
     # Check Early Stopping
     if args.early_stop > 0:
-        stop_a = early_stop_amplitude.step(avg_vloss_ampl, current_lr_ampl)
-        stop_p = early_stop_phase.step(avg_vloss_ph, current_lr_ph)
-        if stop_a and stop_p:
+        if not stopped_amplitude:
+            stopped_amplitude = early_stop_amplitude.step(avg_vloss_ampl, current_lr_ampl)
+        if not stopped_phase:
+            stopped_phase = early_stop_phase.step(avg_vloss_ph, current_lr_ph)
+
+        if stopped_amplitude and stopped_phase:
             print(f"\n=== [Early Stopping Triggered at Epoch {epoch + 1}] ===")
             print(f"  Amplitude: {early_stop_amplitude.stop_reason}")
             print(f"  Phase:     {early_stop_phase.stop_reason}")
@@ -268,12 +257,22 @@ for epoch in range(args.epochs):
 
 
 # ---------------------------------------------------------------------------
-# Save 1 Unified CSV History
+# Save Metrics (CSV and NPY)
 # ---------------------------------------------------------------------------
 csv_filename = f"{title}_metrics.csv"
-df_history = pd.DataFrame(history)
-df_history.to_csv(csv_filename, index=False)
-print(f"\nUnified metrics CSV saved: {csv_filename}")
+try:
+    df_history = pd.DataFrame(history)
+    df_history.to_csv(csv_filename, index=False)
+    print(f"\nUnified metrics CSV saved: {csv_filename}")
+except Exception as e:
+    print(f"\nWarning: Failed to save metrics CSV ({e}).")
+
+npy_filename = f"{title}_metrics.npy"
+try:
+    np.save(npy_filename, history)
+    print(f"Unified metrics NPY saved: {npy_filename}")
+except Exception as e:
+    print(f"\nWarning: Failed to save metrics NPY ({e}).")
 
 # ---------------------------------------------------------------------------
 # Generate Professional Plots (Log Scale, Red/Blue/Black, Min Val Tagged)
@@ -328,6 +327,7 @@ print(f"  - Amplitude Full Checkpoint: {title}_amplitude_checkpoint.pt (includes
 print(f"  - Best Phase Model:          {title}_phase_best.pt")
 print(f"  - Phase Full Checkpoint:     {title}_phase_checkpoint.pt (includes optimizer state)")
 print(f"  - History CSV:               {csv_filename}")
+print(f"  - History NPY:               {npy_filename}")
 print(f"  - Amplitude Plot:            {plot_ampl_filename}")
 print(f"  - Phase Plot:                {plot_phase_filename}")
 print(f"  - Mismatch Plot:             {plot_mismatch_filename}")

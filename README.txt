@@ -64,3 +64,12 @@
         - added torch compile to training, hope it can help w/speed.
         - Making Purrer et all slideshow.
         - Also trying logfreq.
+    - 9/11
+        - Bad tail for high spin binaries,
+        - accuracy stucked at 1e-6
+        - tried logfreq but showed no substantial advantage.
+        - tried f64 but if I do not get close to 1e-7 or 1e-8 accuracy f64 do not help much.
+        - trying weighted loss for high spin binaries
+        - trying residual phase: Ae phase already knows the mean phase shape and computes residual only
+        - trying frequency plain
+        - trying plain ae with tweak to training. 
