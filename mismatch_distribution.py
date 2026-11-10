@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset, random_split
 
-from models import Autoencoder_CNN_NOBN
+from models import Autoencoder_CNN_NOBN, ResidualPhaseAutoencoder
 from utils import get_phase, compute_mismatches, plot_mismatch_distribution
 
 
@@ -62,6 +62,12 @@ def parse_args():
         type=int,
         default=1024,
         help="Evaluation batch size (default: 1024)",
+    )
+    parser.add_argument(
+        "--output_plot",
+        type=str,
+        default=None,
+        help="Path for output mismatch distribution plot (default: <title>_mismatch_distribution.png)",
     )
     parser.add_argument(
         "--save_npy",
@@ -153,7 +159,7 @@ def main():
     # Initialize models and load weights
     print(f"Loading Amplitude model ({args.model}): {args.ampl_model}")
     model_amplitude = build_model(args.model).to(device)
-    raw_a = torch.load(args.ampl_model, map_location=device)
+    raw_a = torch.load(args.ampl_model, map_location=device, weights_only=False)
     if isinstance(raw_a, dict) and "model_state_dict" in raw_a:
         print(f"  Checkpoint Epoch: {raw_a.get('epoch', 'N/A')} | Best Val Loss: {raw_a.get('best_vloss', 'N/A')}")
         state_a = raw_a["model_state_dict"]
@@ -162,14 +168,23 @@ def main():
     model_amplitude.load_state_dict(state_a)
 
     print(f"Loading Phase model ({args.model}):     {args.phase_model}")
-    model_phase = build_model(args.model).to(device)
-    raw_p = torch.load(args.phase_model, map_location=device)
-    if isinstance(raw_p, dict) and "model_state_dict" in raw_p:
-        print(f"  Checkpoint Epoch: {raw_p.get('epoch', 'N/A')} | Best Val Loss: {raw_p.get('best_vloss', 'N/A')}")
-        state_p = raw_p["model_state_dict"]
+    raw_p = torch.load(args.phase_model, map_location=device, weights_only=False)
+    if isinstance(raw_p, dict) and "base_model_state_dict" in raw_p and "mean_phase" in raw_p:
+        print("  Detected ResidualPhaseAutoencoder format.")
+        if "epoch" in raw_p:
+            print(f"  Checkpoint Epoch: {raw_p.get('epoch', 'N/A')} | Best Val Loss: {raw_p.get('best_vloss', 'N/A')}")
+        base_p = build_model(args.model).to(device)
+        base_p.load_state_dict(raw_p["base_model_state_dict"])
+        mean_phase_tensor = torch.as_tensor(raw_p["mean_phase"], dtype=torch.float32, device=device)
+        model_phase = ResidualPhaseAutoencoder(base_p, mean_phase_tensor).to(device)
     else:
-        state_p = raw_p
-    model_phase.load_state_dict(state_p)
+        model_phase = build_model(args.model).to(device)
+        if isinstance(raw_p, dict) and "model_state_dict" in raw_p:
+            print(f"  Checkpoint Epoch: {raw_p.get('epoch', 'N/A')} | Best Val Loss: {raw_p.get('best_vloss', 'N/A')}")
+            state_p = raw_p["model_state_dict"]
+        else:
+            state_p = raw_p
+        model_phase.load_state_dict(state_p)
 
     # Compute mismatches
     print("Computing waveform mismatches (1 - Overlap)...")
@@ -190,7 +205,7 @@ def main():
     print(f"  99th Percentile:     {p99:.3e}")
 
     # Plot distribution
-    output_plot = f"{title}_mismatch_distribution.png"
+    output_plot = args.output_plot or f"{title}_mismatch_distribution.png"
     plot_mismatch_distribution(mismatches, run_title=title, output_path=output_plot)
 
     if args.save_npy:

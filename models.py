@@ -105,6 +105,33 @@ class FullModel(nn.Module):
         return out
 
 
+class ResidualPhaseAutoencoder(nn.Module):
+    """
+    Phase Autoencoder with Mean-Trajectory Detrending (Residual Learning).
+    Input:  phase (B, 1, 2048) or (B, 2048)
+    Internal: delta_phase = phase - mean_phase (compresses target variance by >10x)
+              out_residual = base_autoencoder(delta_phase)
+    Output: reconstructed phase = out_residual + mean_phase
+    """
+    def __init__(self, base_model: nn.Module, mean_phase: torch.Tensor):
+        super().__init__()
+        self.base_model = base_model
+        if not isinstance(mean_phase, torch.Tensor):
+            mean_phase = torch.as_tensor(mean_phase, dtype=torch.float32)
+        self.register_buffer("mean_phase", mean_phase.view(1, 1, -1))
+
+    def forward(self, phase, return_latent: bool = False):
+        if phase.ndim == 2:
+            phase = phase.unsqueeze(1)
+        delta_phase = phase - self.mean_phase
+        if return_latent:
+            rec_res, z = self.base_model(delta_phase, return_latent=True)
+            return rec_res + self.mean_phase, z
+        rec_res = self.base_model(delta_phase)
+        return rec_res + self.mean_phase
+
+
+
 
 
 

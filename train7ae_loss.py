@@ -155,10 +155,10 @@ opt_fn_phase = opt_add.SOAP(
 )
 
 scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
-    opt_fn_amplitude, factor=0.5, patience=50, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=20
+    opt_fn_amplitude, factor=0.5, patience=100, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=25
 )
 scheduler_phase = lr_scheduler.ReduceLROnPlateau(
-    opt_fn_phase, factor=0.5, patience=50, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=20
+    opt_fn_phase, factor=0.5, patience= 100, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=25
 )
 
 # ---------------------------------------------------------------------------

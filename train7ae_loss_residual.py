@@ -185,10 +185,10 @@ opt_fn_phase = opt_add.SOAP(
 )
 
 scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
-    opt_fn_amplitude, factor=0.5, patience=50, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=20
+    opt_fn_amplitude, factor=0.5, patience=100, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=25
 )
 scheduler_phase = lr_scheduler.ReduceLROnPlateau(
-    opt_fn_phase, factor=0.5, patience=50, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=20
+    opt_fn_phase, factor=0.5, patience=100, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=25
 )
 
 # ---------------------------------------------------------------------------
@@ -341,8 +341,8 @@ best_ampl_path = f"{title}_amplitude_best.pt"
 best_phase_path = f"{title}_phase_best.pt"
 
 print(f"\nLoading best saved models for mismatch evaluation...")
-raw_model_amplitude.load_state_dict(torch.load(best_ampl_path, map_location=device))
-saved_phase_ckpt = torch.load(best_phase_path, map_location=device)
+raw_model_amplitude.load_state_dict(torch.load(best_ampl_path, map_location=device, weights_only=False))
+saved_phase_ckpt = torch.load(best_phase_path, map_location=device, weights_only=False)
 raw_model_phase_base.load_state_dict(saved_phase_ckpt["base_model_state_dict"])
 
 print("Computing test set waveform mismatches...")
