@@ -8,7 +8,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-from torch.optim import lr_scheduler
+from torch.optim import AdamW, lr_scheduler
 from torch.utils.data import DataLoader, random_split, TensorDataset, Subset
 import pytorch_optimizer as opt_add
 
@@ -16,74 +16,23 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.set_float32_matmul_precision('highest')
 torch.backends.cudnn.allow_tf32 = False
 
-from models import Autoencoder_CNN_NOBN
+
+
+from models import AutoencoderW
 from utils import (
+    get_phase,
     train_one_epoch,
     validate,
     plot_training_curves,
+    compute_mismatches,
     plot_mismatch_distribution,
-    TasosOverlapTorch,
     EarlyStopping,
 )
-
-
-def compute_mismatches_logfreq(model_amplitude, model_logfreq, loader, mu, sd, device=None):
-    """
-    Evaluates Amplitude and Log-Frequency Autoencoders, denormalizes frequency:
-        omega = exp(x * sd + mu)
-    reconstructs physical polar waveforms by exact discrete cumulative sum integration:
-        phi = [0, cumsum(omega[:-1])]
-    and calculates individual waveform mismatches M = 1 - Overlap.
-    """
-    if device is None:
-        device = next(model_amplitude.parameters()).device
-    model_amplitude.eval()
-    model_logfreq.eval()
-    dtype = next(model_amplitude.parameters()).dtype
-
-    mu_tensor = torch.as_tensor(mu, dtype=dtype, device=device).view(1, -1)
-    sd_tensor = torch.as_tensor(sd, dtype=dtype, device=device).view(1, -1)
-
-    mismatches = []
-    with torch.no_grad():
-        for b_ampl, b_logfreq in loader:
-            b_ampl = b_ampl.to(device=device, dtype=dtype)
-            b_logfreq = b_logfreq.to(device=device, dtype=dtype)
-            if b_ampl.ndim == 2:
-                b_ampl = b_ampl.unsqueeze(1)
-            if b_logfreq.ndim == 2:
-                b_logfreq = b_logfreq.unsqueeze(1)
-
-            pred_ampl = model_amplitude(b_ampl)
-            pred_logfreq = model_logfreq(b_logfreq)
-
-            # Denormalize standardized log-frequency: x -> log_omega
-            true_log_om = b_logfreq.squeeze(1) * sd_tensor + mu_tensor
-            pred_log_om = pred_logfreq.squeeze(1) * sd_tensor + mu_tensor
-
-            # Reconstruct instantaneous frequency: omega = exp(log_omega)
-            true_om = torch.exp(true_log_om)
-            pred_om = torch.exp(pred_log_om)
-
-            # Exact discrete cumulative sum integration: phi = [0, cumsum(omega[:-1])]
-            zeros = torch.zeros((true_om.shape[0], 1), dtype=dtype, device=device)
-            true_phase = torch.cat([zeros, torch.cumsum(true_om[:, :-1], dim=-1)], dim=-1)
-            pred_phase = torch.cat([zeros, torch.cumsum(pred_om[:, :-1], dim=-1)], dim=-1)
-
-            true_wf = torch.polar(b_ampl.squeeze(1), -true_phase)
-            pred_wf = torch.polar(torch.clamp(pred_ampl.squeeze(1), min=0.0), -pred_phase)
-
-            match = TasosOverlapTorch(true_wf, pred_wf)
-            mismatch = torch.clamp(1.0 - match, min=0.0)
-            mismatches.extend(mismatch.cpu().numpy().tolist())
-
-    return np.array(mismatches, dtype=np.float64)
-
 
 # ---------------------------------------------------------------------------
 # CLI Arguments (Minimal Execution Controls)
 # ---------------------------------------------------------------------------
-parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Log Frequency (SOAP)")
+parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Phase (SOAP + Weighted Loss)")
 parser.add_argument("--title", type=str, default=None, help="Run title / prefix for output files")
 parser.add_argument("--epochs", type=int, default=5000, help="Training epochs (default: 5000)")
 parser.add_argument("--early_stop", type=int, default=300, help="Early stopping patience in epochs (default: 300, 0 to disable)")
@@ -96,10 +45,10 @@ if not title:
     except EOFError:
         title = ""
     if not title:
-        title = f"AE_logfreq_soap_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        title = f"AE_soap_weighted_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-model_name = "Autoencoder_CNN_NOBN"
-print(f"=== Starting Run: {title} | Model: {model_name} | Targets: Amplitude & Standardized Log-Frequency | Optimizer: SOAP | Scheduler: PLATEAU | Epochs: {args.epochs} ===")
+model_name = "AutoencoderW"
+print(f"=== Starting Run: {title} | Model: {model_name} | Optimizer: SOAP | Scheduler: PLATEAU | Epochs: {args.epochs} ===")
 
 # ---------------------------------------------------------------------------
 # Device Configuration
@@ -121,74 +70,75 @@ if not os.path.exists(filepath):
 
 with h5py.File(filepath, "r") as f:
     waveforms_ds = f["Waveforms"]
+    params_ds = f["Parameters"]
     n_samples, sample_len = waveforms_ds.shape
     amplitude = np.empty((n_samples, sample_len), dtype=np.float32)
-    log_freq = np.empty((n_samples, sample_len), dtype=np.float32)
+    phase = np.empty((n_samples, sample_len), dtype=np.float32)
+    params = params_ds[:]
     chunk_size = 10000
     for start in range(0, n_samples, chunk_size):
         end = min(start + chunk_size, n_samples)
-        wf_chunk = waveforms_ds[start:end]
-        amplitude[start:end] = np.abs(wf_chunk).astype(np.float32)
-        # Exact discrete instantaneous frequency: omega[k] = phi[k+1] - phi[k]
-        phase_raw = -np.unwrap(np.angle(wf_chunk), axis=-1)
-        phase_raw = phase_raw - phase_raw[:, :1]
-        om = np.diff(phase_raw, axis=-1)
-        om = np.concatenate([om, om[:, -1:]], axis=-1)
-        log_freq[start:end] = np.log(np.maximum(om, 1e-6)).astype(np.float32)
+        amplitude[start:end] = np.abs(waveforms_ds[start:end]).astype(np.float32)
+        phase[start:end] = get_phase(waveforms_ds[start:end]).astype(np.float32)
 
 ampl_tensor = torch.from_numpy(amplitude)
-logfreq_tensor = torch.from_numpy(log_freq)
+phase_tensor = torch.from_numpy(phase)
+
+# Hardcoded Primary In-Plane Spin Loss Weighting (Threshold 0.30, Exponent 1.5, Max 3.5, Normalized)
+chi1_perp = np.sqrt(params[:, 1] ** 2 + params[:, 2] ** 2).astype(np.float32)
+ramp = np.clip((chi1_perp - 0.30) / (0.80 - 0.30), 0.0, 1.0)
+sample_weights = 1.0 + (3.5 - 1.0) * (ramp ** 1.5)
+sample_weights = (sample_weights / sample_weights.mean()).astype(np.float32)
+weights_tensor = torch.from_numpy(sample_weights)
+print(f"Hardcoded sample weights applied (ramp from chi1_perp=0.30, power=1.5): min={sample_weights.min():.3f}, max={sample_weights.max():.3f}, mean={sample_weights.mean():.3f}")
 
 # Split train/val/test once
-joint_dataset = TensorDataset(ampl_tensor, logfreq_tensor)
+joint_dataset = TensorDataset(ampl_tensor, phase_tensor, weights_tensor)
 j_train, j_val, j_test = random_split(joint_dataset, [0.8, 0.1, 0.1], generator=torch.Generator().manual_seed(42))
 
-# Per-timestep standardization (mu, sd) strictly on the training set
-train_idx = np.array(j_train.indices)
-mu = log_freq[train_idx].mean(axis=0, keepdims=True).astype(np.float32)
-sd = (log_freq[train_idx].std(axis=0, keepdims=True) + 1e-6).astype(np.float32)
+# Derive single-branch subsets with sample weights (using Subset to avoid memory copying)
+a_dataset = TensorDataset(ampl_tensor, weights_tensor)
+p_dataset = TensorDataset(phase_tensor, weights_tensor)
 
-# In-place standardize logfreq_tensor
-logfreq_tensor.sub_(torch.from_numpy(mu)).div_(torch.from_numpy(sd))
+a_train = Subset(a_dataset, j_train.indices)
+p_train = Subset(p_dataset, j_train.indices)
+a_val   = Subset(a_dataset, j_val.indices)
+p_val   = Subset(p_dataset, j_val.indices)
 
-# Derive single-branch subsets using the exact same indices
-a_train  = Subset(ampl_tensor, j_train.indices)
-lf_train = Subset(logfreq_tensor, j_train.indices)
-a_val    = Subset(ampl_tensor, j_val.indices)
-lf_val   = Subset(logfreq_tensor, j_val.indices)
+# Test loader yields (amplitude, phase) for standard physical mismatch calculation
+test_dataset = Subset(TensorDataset(ampl_tensor, phase_tensor), j_test.indices)
+test_loader = DataLoader(test_dataset, batch_size=1024, shuffle=False)
 
-test_loader = DataLoader(j_test, batch_size=1024, shuffle=False)
 a_train_loader = DataLoader(a_train, batch_size=128, shuffle=True)
 a_val_loader = DataLoader(a_val, batch_size=2048, shuffle=False)
-lf_train_loader = DataLoader(lf_train, batch_size=128, shuffle=True)
-lf_val_loader = DataLoader(lf_val, batch_size=2048, shuffle=False)
+p_train_loader = DataLoader(p_train, batch_size=128, shuffle=True)
+p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 
 
 # ---------------------------------------------------------------------------
 # Models, Loss Functions & Regularization
 # ---------------------------------------------------------------------------
 
-raw_model_amplitude = Autoencoder_CNN_NOBN().to(device)
-raw_model_logfreq = Autoencoder_CNN_NOBN().to(device)
+raw_model_amplitude = AutoencoderW().to(device)
+raw_model_phase = AutoencoderW().to(device)
 
 if sys.version_info >= (3, 13):
     print("Notice: torch.compile/Dynamo is not supported on Python 3.13+. Continuing with uncompiled models.")
     model_amplitude = raw_model_amplitude
-    model_logfreq = raw_model_logfreq
+    model_phase = raw_model_phase
 else:
     try:
         print("Compiling models with torch.compile...")
         model_amplitude = torch.compile(raw_model_amplitude)
-        model_logfreq = torch.compile(raw_model_logfreq)
+        model_phase = torch.compile(raw_model_phase)
     except Exception as e:
         print(f"Notice: torch.compile failed ({e}). Continuing with uncompiled models.")
         model_amplitude = raw_model_amplitude
-        model_logfreq = raw_model_logfreq
+        model_phase = raw_model_phase
 
-# Dedicated per-branch losses
+# Dedicated per-branch losses with sample weighting support
 loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3)
-loss_fn_logfreq = nn.SmoothL1Loss(beta=1e-3)
-
+loss_fn_phase = nn.SmoothL1Loss(beta=1e-3)
 lambda_latent = 1e-6
 
 # ---------------------------------------------------------------------------
@@ -198,47 +148,47 @@ opt_fn_amplitude = opt_add.SOAP(
     model_amplitude.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
     weight_decay=0.0, precondition_frequency=25, merge_dims=False, eps=0.0001
 )
-opt_fn_logfreq = opt_add.SOAP(
-    model_logfreq.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+opt_fn_phase = opt_add.SOAP(
+    model_phase.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
     weight_decay=0.0, precondition_frequency=25, merge_dims=False, eps=0.0001
 )
 
 scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
     opt_fn_amplitude, factor=0.5, patience=100, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=25
 )
-scheduler_logfreq = lr_scheduler.ReduceLROnPlateau(
-    opt_fn_logfreq, factor=0.5, patience=100, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=25
+scheduler_phase = lr_scheduler.ReduceLROnPlateau(
+    opt_fn_phase, factor=0.5, patience= 100, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=25
 )
 
 # ---------------------------------------------------------------------------
 # Training Loop
 # ---------------------------------------------------------------------------
 best_vloss_amplitude = float("inf")
-best_vloss_logfreq = float("inf")
+best_vloss_phase = float("inf")
 
 history = {
     "epoch": [],
     "train_loss_amplitude": [],
     "val_loss_amplitude": [],
     "lr_amplitude": [],
-    "train_loss_logfreq": [],
-    "val_loss_logfreq": [],
-    "lr_logfreq": [],
+    "train_loss_phase": [],
+    "val_loss_phase": [],
+    "lr_phase": [],
 }
 
 # Early Stopping Initialization
 stopped_amplitude = False
-stopped_logfreq = False
+stopped_phase = False
 
 if args.early_stop > 0:
-    min_lr_target = 5e-7
+    min_lr_target = 5e-7 
     early_stop_amplitude = EarlyStopping(
         patience=args.early_stop, threshold=0.001, mode="rel", min_lr=min_lr_target, patience_at_min_lr=50
     )
-    early_stop_logfreq = EarlyStopping(
+    early_stop_phase = EarlyStopping(
         patience=args.early_stop, threshold=0.001, mode="rel", min_lr=min_lr_target, patience_at_min_lr=50
     )
-    print(f"Early stopping enabled: global_patience={args.early_stop}, floor_patience=50 at min_lr={min_lr_target:.1e} (rel threshold=0.1%)")
+    print(f"Early stopping enabled: global_patience={args.early_stop}, floor_patience=50 at min_lr={min_lr_target:.1e} (rel threshold=0.5%)")
 else:
     print("Early stopping disabled.")
 
@@ -248,29 +198,29 @@ for epoch in range(args.epochs):
     avg_loss_ampl = train_one_epoch(
         model_amplitude, opt_fn_amplitude, loss_fn_amplitude, device, epoch, None, a_train_loader, lambda_latent=lambda_latent
     )
-    avg_loss_lf = train_one_epoch(
-        model_logfreq, opt_fn_logfreq, loss_fn_logfreq, device, epoch, None, lf_train_loader, lambda_latent=lambda_latent
+    avg_loss_ph = train_one_epoch(
+        model_phase, opt_fn_phase, loss_fn_phase, device, epoch, None, p_train_loader, lambda_latent=lambda_latent
     )
 
     # Validate
     avg_vloss_ampl = validate(model_amplitude, a_val_loader, loss_fn_amplitude, device=device, lambda_latent=lambda_latent)
-    avg_vloss_lf = validate(model_logfreq, lf_val_loader, loss_fn_logfreq, device=device, lambda_latent=lambda_latent)
+    avg_vloss_ph = validate(model_phase, p_val_loader, loss_fn_phase, device=device, lambda_latent=lambda_latent)
 
     # Step LR Scheduler
     scheduler_amplitude.step(avg_vloss_ampl)
-    scheduler_logfreq.step(avg_vloss_lf)
+    scheduler_phase.step(avg_vloss_ph)
 
     current_lr_ampl = scheduler_amplitude.get_last_lr()[0]
-    current_lr_lf = scheduler_logfreq.get_last_lr()[0]
+    current_lr_ph = scheduler_phase.get_last_lr()[0]
 
     # Record history
     history["epoch"].append(epoch + 1)
     history["train_loss_amplitude"].append(avg_loss_ampl)
     history["val_loss_amplitude"].append(avg_vloss_ampl)
     history["lr_amplitude"].append(current_lr_ampl)
-    history["train_loss_logfreq"].append(avg_loss_lf)
-    history["val_loss_logfreq"].append(avg_vloss_lf)
-    history["lr_logfreq"].append(current_lr_lf)
+    history["train_loss_phase"].append(avg_loss_ph)
+    history["val_loss_phase"].append(avg_vloss_ph)
+    history["lr_phase"].append(current_lr_ph)
 
     # Save best Amplitude model & optimizer state
     if avg_vloss_ampl < best_vloss_amplitude:
@@ -287,57 +237,48 @@ for epoch in range(args.epochs):
             f"{title}_amplitude_checkpoint.pt",
         )
 
-    # Save best Log-Frequency model & optimizer state (with mu, sd normalization)
-    if avg_vloss_lf < best_vloss_logfreq:
-        best_vloss_logfreq = avg_vloss_lf
-        torch.save(raw_model_logfreq.state_dict(), f"{title}_logfreq_best.pt")
+    # Save best Phase model & optimizer state
+    if avg_vloss_ph < best_vloss_phase:
+        best_vloss_phase = avg_vloss_ph
+        torch.save(raw_model_phase.state_dict(), f"{title}_phase_best.pt")
         torch.save(
             {
                 "epoch": epoch + 1,
-                "model_state_dict": raw_model_logfreq.state_dict(),
-                "optimizer_state_dict": opt_fn_logfreq.state_dict(),
-                "scheduler_state_dict": scheduler_logfreq.state_dict(),
-                "best_vloss": best_vloss_logfreq,
-                "mu": mu,
-                "sd": sd,
+                "model_state_dict": raw_model_phase.state_dict(),
+                "optimizer_state_dict": opt_fn_phase.state_dict(),
+                "scheduler_state_dict": scheduler_phase.state_dict(),
+                "best_vloss": best_vloss_phase,
             },
-            f"{title}_logfreq_checkpoint.pt",
+            f"{title}_phase_checkpoint.pt",
         )
 
     if (epoch + 1) % 10 == 0 or epoch == 0 or (epoch + 1) == args.epochs:
         print(f"Epoch [{epoch + 1}/{args.epochs}]")
-        print(f"  Amplitude   | Train Loss: {avg_loss_ampl:.6f} | Val Loss: {avg_vloss_ampl:.6f} | Best: {best_vloss_amplitude:.6f} | LR: {current_lr_ampl:.2e}")
-        print(f"  Log-Freq    | Train Loss: {avg_loss_lf:.6f} | Val Loss: {avg_vloss_lf:.6f} | Best: {best_vloss_logfreq:.6f} | LR: {current_lr_lf:.2e}")
+        print(f"  Amplitude | Train Loss: {avg_loss_ampl:.6f} | Val Loss: {avg_vloss_ampl:.6f} | Best: {best_vloss_amplitude:.6f} | LR: {current_lr_ampl:.2e}")
+        print(f"  Phase     | Train Loss: {avg_loss_ph:.6f} | Val Loss: {avg_vloss_ph:.6f} | Best: {best_vloss_phase:.6f} | LR: {current_lr_ph:.2e}")
 
     # Check Early Stopping
     if args.early_stop > 0:
         if not stopped_amplitude:
             stopped_amplitude = early_stop_amplitude.step(avg_vloss_ampl, current_lr_ampl)
-        if not stopped_logfreq:
-            stopped_logfreq = early_stop_logfreq.step(avg_vloss_lf, current_lr_lf)
+        if not stopped_phase:
+            stopped_phase = early_stop_phase.step(avg_vloss_ph, current_lr_ph)
 
-        if stopped_amplitude and stopped_logfreq:
+        if stopped_amplitude and stopped_phase:
             print(f"\n=== [Early Stopping Triggered at Epoch {epoch + 1}] ===")
             print(f"  Amplitude: {early_stop_amplitude.stop_reason}")
-            print(f"  Log-Freq:  {early_stop_logfreq.stop_reason}")
+            print(f"  Phase:     {early_stop_phase.stop_reason}")
             break
 
 
 # ---------------------------------------------------------------------------
-# Save Metrics & Normalization Stats
+# Save Metrics (CSV and NPY)
 # ---------------------------------------------------------------------------
-norm_filename = f"{title}_logfreq_norm.npz"
-try:
-    np.savez(norm_filename, mu=mu, sd=sd)
-    print(f"\nLog-frequency normalization stats saved: {norm_filename}")
-except Exception as e:
-    print(f"\nWarning: Failed to save normalization stats ({e}).")
-
 csv_filename = f"{title}_metrics.csv"
 try:
     df_history = pd.DataFrame(history)
     df_history.to_csv(csv_filename, index=False)
-    print(f"Unified metrics CSV saved: {csv_filename}")
+    print(f"\nUnified metrics CSV saved: {csv_filename}")
 except Exception as e:
     print(f"\nWarning: Failed to save metrics CSV ({e}).")
 
@@ -362,15 +303,15 @@ plot_training_curves(
     output_path=plot_ampl_filename,
 )
 
-plot_logfreq_filename = f"{title}_logfreq_plot.png"
+plot_phase_filename = f"{title}_phase_plot.png"
 plot_training_curves(
     epochs=history["epoch"],
-    train_losses=history["train_loss_logfreq"],
-    val_losses=history["val_loss_logfreq"],
-    lrs=history["lr_logfreq"],
+    train_losses=history["train_loss_phase"],
+    val_losses=history["val_loss_phase"],
+    lrs=history["lr_phase"],
     run_title=title,
-    metric_name="LogFrequency",
-    output_path=plot_logfreq_filename,
+    metric_name="Phase",
+    output_path=plot_phase_filename,
 )
 
 print(f"\nTraining completed successfully for run '{title}'.")
@@ -379,14 +320,14 @@ print(f"\nTraining completed successfully for run '{title}'.")
 # Evaluate Best Saved Models and Plot Mismatch Distribution
 # ---------------------------------------------------------------------------
 best_ampl_path = f"{title}_amplitude_best.pt"
-best_logfreq_path = f"{title}_logfreq_best.pt"
+best_phase_path = f"{title}_phase_best.pt"
 
 print(f"\nLoading best saved models for mismatch evaluation...")
 raw_model_amplitude.load_state_dict(torch.load(best_ampl_path, map_location=device))
-raw_model_logfreq.load_state_dict(torch.load(best_logfreq_path, map_location=device))
+raw_model_phase.load_state_dict(torch.load(best_phase_path, map_location=device))
 
-print("Computing test set waveform mismatches (denormalizing and integrating frequency via cumsum)...")
-mismatches = compute_mismatches_logfreq(model_amplitude, model_logfreq, test_loader, mu=mu, sd=sd, device=device)
+print("Computing test set waveform mismatches...")
+mismatches = compute_mismatches(model_amplitude, model_phase, test_loader, device=device)
 
 plot_mismatch_filename = f"{title}_mismatch_distribution.png"
 plot_mismatch_distribution(
@@ -396,14 +337,13 @@ plot_mismatch_distribution(
 )
 
 print(f"\nSaved artifacts:")
-print(f"  - Best Amplitude Model:         {title}_amplitude_best.pt")
-print(f"  - Amplitude Full Checkpoint:    {title}_amplitude_checkpoint.pt (includes optimizer state)")
-print(f"  - Best Log-Frequency Model:     {title}_logfreq_best.pt")
-print(f"  - Log-Freq Full Checkpoint:     {title}_logfreq_checkpoint.pt (includes optimizer state, mu, sd)")
-print(f"  - Log-Freq Normalization Stats: {norm_filename}")
-print(f"  - History CSV:                  {csv_filename}")
-print(f"  - History NPY:                  {npy_filename}")
-print(f"  - Amplitude Plot:               {plot_ampl_filename}")
-print(f"  - Log-Frequency Plot:           {plot_logfreq_filename}")
-print(f"  - Mismatch Plot:                {plot_mismatch_filename}")
-print(f"  - Test Set Mismatch Stats:      Median: {np.median(mismatches):.2e} | Mean: {np.mean(mismatches):.2e} | Max: {np.max(mismatches):.2e}")
+print(f"  - Best Amplitude Model:      {title}_amplitude_best.pt")
+print(f"  - Amplitude Full Checkpoint: {title}_amplitude_checkpoint.pt (includes optimizer state)")
+print(f"  - Best Phase Model:          {title}_phase_best.pt")
+print(f"  - Phase Full Checkpoint:     {title}_phase_checkpoint.pt (includes optimizer state)")
+print(f"  - History CSV:               {csv_filename}")
+print(f"  - History NPY:               {npy_filename}")
+print(f"  - Amplitude Plot:            {plot_ampl_filename}")
+print(f"  - Phase Plot:                {plot_phase_filename}")
+print(f"  - Mismatch Plot:             {plot_mismatch_filename}")
+print(f"  - Test Set Mismatch Stats:   Median: {np.median(mismatches):.2e} | Mean: {np.mean(mismatches):.2e} | Max: {np.max(mismatches):.2e}")

@@ -1,9 +1,9 @@
 universe = vanilla
 
-executable              = train7ae.sh
-log                     = condor_logs/train7ae.log
-output                  = condor_logs/train7ae.$(Cluster).$(Process).out
-error                   = condor_logs/train7ae.$(Cluster).$(Process).err
+executable              = train7ae_w.sh
+log                     = condor_logs/train7ae_w.log
+output                  = condor_logs/train7ae_w.$(Cluster).$(Process).out
+error                   = condor_logs/train7ae_w.$(Cluster).$(Process).err
 
 getenv = True
 request_cpus   = 8
