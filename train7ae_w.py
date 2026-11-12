@@ -32,7 +32,7 @@ from utils import (
 # ---------------------------------------------------------------------------
 # CLI Arguments (Minimal Execution Controls)
 # ---------------------------------------------------------------------------
-parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Phase (SOAP + Weighted Loss)")
+parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Phase (SOAP)")
 parser.add_argument("--title", type=str, default=None, help="Run title / prefix for output files")
 parser.add_argument("--epochs", type=int, default=5000, help="Training epochs (default: 5000)")
 parser.add_argument("--early_stop", type=int, default=300, help="Early stopping patience in epochs (default: 300, 0 to disable)")
@@ -45,7 +45,7 @@ if not title:
     except EOFError:
         title = ""
     if not title:
-        title = f"AE_soap_weighted_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        title = f"AE_soap_w_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 model_name = "AutoencoderW"
 print(f"=== Starting Run: {title} | Model: {model_name} | Optimizer: SOAP | Scheduler: PLATEAU | Epochs: {args.epochs} ===")
@@ -84,30 +84,17 @@ with h5py.File(filepath, "r") as f:
 ampl_tensor = torch.from_numpy(amplitude)
 phase_tensor = torch.from_numpy(phase)
 
-# Hardcoded Primary In-Plane Spin Loss Weighting (Threshold 0.30, Exponent 1.5, Max 3.5, Normalized)
-chi1_perp = np.sqrt(params[:, 1] ** 2 + params[:, 2] ** 2).astype(np.float32)
-ramp = np.clip((chi1_perp - 0.30) / (0.80 - 0.30), 0.0, 1.0)
-sample_weights = 1.0 + (3.5 - 1.0) * (ramp ** 1.5)
-sample_weights = (sample_weights / sample_weights.mean()).astype(np.float32)
-weights_tensor = torch.from_numpy(sample_weights)
-print(f"Hardcoded sample weights applied (ramp from chi1_perp=0.30, power=1.5): min={sample_weights.min():.3f}, max={sample_weights.max():.3f}, mean={sample_weights.mean():.3f}")
-
 # Split train/val/test once
-joint_dataset = TensorDataset(ampl_tensor, phase_tensor, weights_tensor)
+joint_dataset = TensorDataset(ampl_tensor, phase_tensor)
 j_train, j_val, j_test = random_split(joint_dataset, [0.8, 0.1, 0.1], generator=torch.Generator().manual_seed(42))
 
-# Derive single-branch subsets with sample weights (using Subset to avoid memory copying)
-a_dataset = TensorDataset(ampl_tensor, weights_tensor)
-p_dataset = TensorDataset(phase_tensor, weights_tensor)
+# Derive single-branch subsets using the exact same indices
+a_train = Subset(ampl_tensor, j_train.indices)
+p_train = Subset(phase_tensor, j_train.indices)
+a_val   = Subset(ampl_tensor, j_val.indices)
+p_val   = Subset(phase_tensor, j_val.indices)
 
-a_train = Subset(a_dataset, j_train.indices)
-p_train = Subset(p_dataset, j_train.indices)
-a_val   = Subset(a_dataset, j_val.indices)
-p_val   = Subset(p_dataset, j_val.indices)
-
-# Test loader yields (amplitude, phase) for standard physical mismatch calculation
-test_dataset = Subset(TensorDataset(ampl_tensor, phase_tensor), j_test.indices)
-test_loader = DataLoader(test_dataset, batch_size=1024, shuffle=False)
+test_loader = DataLoader(j_test, batch_size=1024, shuffle=False)
 
 a_train_loader = DataLoader(a_train, batch_size=128, shuffle=True)
 a_val_loader = DataLoader(a_val, batch_size=2048, shuffle=False)
@@ -136,7 +123,7 @@ else:
         model_amplitude = raw_model_amplitude
         model_phase = raw_model_phase
 
-# Dedicated per-branch losses with sample weighting support
+# Dedicated per-branch losses
 loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3)
 loss_fn_phase = nn.SmoothL1Loss(beta=1e-3)
 lambda_latent = 1e-6

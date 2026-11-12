@@ -242,3 +242,4 @@ datasets/*
 
 # Archive / old stuff
 old_stuff/
+.vscode
