@@ -377,11 +377,23 @@ class CoorbitalAE(nn.Module):
         self.E_cooP =  FlexE(bottleneck=64, width=1, channels=1)
         self.D_cooP =   FlexD(bottleneck=64, width=1, channels=1)
     
-    def forward(self, ophase,q,chi1,chi2,cooA, cooP):
-        ophase = self.D_ophase(self.E_ophase(ophase))
-        q = F.normalize(self.D_q(self.E_q(q)))
-        chi1 = self.D_chi1(self.E_chi1(chi1))
-        chi2 = self.D_chi2(self.E_chi2(chi2))
-        cooA = F.relu(self.D_cooA(self.E_cooA(cooA)))
-        cooP = self.D_cooP(self.E_cooP(cooP))
-        return (ophase, q, chi1, chi2, cooA, cooP)
+    def forward(self, ophase, q, chi1, chi2, cooA, cooP, return_latent: bool = False):
+        z_ophase = self.E_ophase(ophase)
+        z_q = self.E_q(q)
+        z_chi1 = self.E_chi1(chi1)
+        z_chi2 = self.E_chi2(chi2)
+        z_cooA = self.E_cooA(cooA)
+        z_cooP = self.E_cooP(cooP)
+
+        rec_ophase = self.D_ophase(z_ophase)
+        rec_q = F.normalize(self.D_q(z_q))
+        rec_chi1 = self.D_chi1(z_chi1)
+        rec_chi2 = self.D_chi2(z_chi2)
+        rec_cooA = F.relu(self.D_cooA(z_cooA))
+        rec_cooP = self.D_cooP(z_cooP)
+
+        recs = (rec_ophase, rec_q, rec_chi1, rec_chi2, rec_cooA, rec_cooP)
+        if return_latent:
+            latents = (z_ophase, z_q, z_chi1, z_chi2, z_cooA, z_cooP)
+            return recs, latents
+        return recs

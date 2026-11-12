@@ -4,6 +4,16 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 from pycbc import conversions
 
+try:
+    from gwsurrogate.new.precessing_surrogate import rotateWaveform, multiplyQuats
+except ImportError:
+    rotateWaveform = None
+    multiplyQuats = None
+
+
+# ==============================================================================
+# SECTION 1: Signal Processing & Phase Alignment
+# ==============================================================================
 
 def get_phase(dataset):
     '''
@@ -18,123 +28,198 @@ def get_phase(dataset):
     return phase
 
 
-def count_model_params(model: nn.Module) -> dict:
-    """Computes trainable, non-trainable, and total parameters in PyTorch."""
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    non_trainable = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-    return {
-        "trainable": trainable,
-        "non_trainable": non_trainable,
-        "total": trainable + non_trainable,
-    }
+# ==============================================================================
+# SECTION 2: Physics, Overlap & Inertial Waveforms
+# ==============================================================================
+
+def TasosOverlapTorch(h1, h2, dt=2 * 4.925794970773135e-06, eps: float = 1e-12):
+    '''
+    dt is 2M_odot in seconds.
+    df is the frequency resolution.
+    Promotes FFT and inner product to complex128/float64 so 1.0 - match does not
+    suffer from float32 precision loss (~1e-7) when computing mismatches down to 1e-12.
+    Output belongs to [-1, 1]: 1 is perfect match, 0 is orthogonal, -1 is phase-inverted.
+    '''
+    h1_d = h1.to(torch.complex128)
+    h2_d = h2.to(torch.complex128)
+    h1_f = torch.fft.fft(h1_d, dim=-1) * dt
+    h2_f = torch.fft.fft(h2_d, dim=-1) * dt
+    df = 1.0 / (h1.shape[-1] * dt)
+    sig_norm = 4.0 * df
+    sig1 = torch.sqrt(torch.sum((h1_f.conj() * h1_f).real, dim=-1) * sig_norm + eps)
+    sig2 = torch.sqrt(torch.sum((h2_f.conj() * h2_f).real, dim=-1) * sig_norm + eps)
+    norm = 1.0 / (sig1 * sig2 + eps)
+    inner = torch.sum((h1_f.conj() * h2_f).real, dim=-1)
+    overl = 4.0 * df * inner * norm
+    return torch.clamp(overl, min=-1.0, max=1.0)
 
 
-def get_conv1d_params(in_length: int, out_length: int, in_channels: int, out_channels: int, bias: bool = True):
+def compute_mismatches(model_amplitude, model_phase, loader, device=None, norm: float = 100.0):
     """
-    Finds valid (kernel_size, stride, padding) configurations to map in_length -> out_length,
-    along with total learnable parameters and an instantiated nn.Conv1d layer.
+    Evaluates Amplitude and Phase Autoencoders over a DataLoader yielding (amplitude, phase),
+    reconstructs physical polar waveforms h = A * exp(-i * phase * norm), and calculates
+    individual waveform mismatches M = 1 - Overlap.
     """
-    candidates = []
-    for stride in [1, 2, 4, 8]:
-        for kernel_size in range(2, 50):
-            for padding in range(kernel_size):
-                num = in_length + 2 * padding - kernel_size
-                if num >= 0 and num % stride == 0:
-                    l_out = num // stride + 1
-                    if l_out == out_length:
-                        num_params = out_channels * in_channels * kernel_size + (out_channels if bias else 0)
-                        candidates.append({
-                            "kernel_size": kernel_size,
-                            "stride": stride,
-                            "padding": padding,
-                            "trainable_params": num_params,
-                            "layer": nn.Conv1d(
-                                in_channels=in_channels,
-                                out_channels=out_channels,
-                                kernel_size=kernel_size,
-                                stride=stride,
-                                padding=padding,
-                                bias=bias,
-                            ),
-                        })
-    return candidates
+    if device is None:
+        device = next(model_amplitude.parameters()).device
+    model_amplitude.eval()
+    model_phase.eval()
+    dtype = next(model_amplitude.parameters()).dtype
+
+    mismatches = []
+    with torch.no_grad():
+        for b_ampl, b_phase in loader:
+            b_ampl = b_ampl.to(device=device, dtype=dtype)
+            b_phase = b_phase.to(device=device, dtype=dtype)
+            if b_ampl.ndim == 2:
+                b_ampl = b_ampl.unsqueeze(1)
+            if b_phase.ndim == 2:
+                b_phase = b_phase.unsqueeze(1)
+
+            pred_ampl = model_amplitude(b_ampl)
+            pred_phase = model_phase(b_phase)
+
+            true_wf = torch.polar(b_ampl.squeeze(1), -b_phase.squeeze(1) * norm)
+            pred_wf = torch.polar(torch.clamp(pred_ampl.squeeze(1), min=0.0), -pred_phase.squeeze(1) * norm)
+
+            match = TasosOverlapTorch(true_wf, pred_wf)
+            mismatch = torch.clamp(1.0 - match, min=0.0)
+            mismatches.extend(mismatch.cpu().numpy().tolist())
+
+    return np.array(mismatches, dtype=np.float64)
 
 
-def get_conv_transpose1d_params(
-    in_length: int,
-    out_length: int,
-    in_channels: int,
-    out_channels: int,
-    bias: bool = True,
+def reconstruct_inertial_waveform(cooA, cooP, ophase, q, norm_phase: float = 100.0):
+    """
+    Reconstructs the inertial-frame (2, 2) waveform from co-orbital components
+    following Section III G of Pürrer et al. (2026):
+      1. Unscales orbital phase to physical radians: phi_orb = ophase * norm_phase
+      2. Forms orbital rotation quaternion: R_z = (cos(phi/2), 0, 0, sin(phi/2))
+      3. Composes full rotation quaternion: R = q_copr (x) R_z
+      4. Projects R onto unit sphere
+      5. Forms co-orbital modes array (m in [-2, ..., 2]) with h_{2,-2} = (h_{2,2})*
+      6. Applies Wigner-D rotation to inertial frame: h_inert_22 = (rotateWaveform(R, h_modes))[4]
+
+    Supports both single waveform (1D / 2D) and batched tensors/arrays.
+    """
+    global rotateWaveform, multiplyQuats
+    if rotateWaveform is None or multiplyQuats is None:
+        try:
+            from gwsurrogate.new.precessing_surrogate import rotateWaveform, multiplyQuats
+        except ImportError as e:
+            raise ImportError(f"gwsurrogate is required for inertial waveform reconstruction: {e}")
+
+    # Convert torch.Tensor to numpy
+    if isinstance(cooA, torch.Tensor):
+        cooA = cooA.detach().cpu().numpy()
+    if isinstance(cooP, torch.Tensor):
+        cooP = cooP.detach().cpu().numpy()
+    if isinstance(ophase, torch.Tensor):
+        ophase = ophase.detach().cpu().numpy()
+    if isinstance(q, torch.Tensor):
+        q = q.detach().cpu().numpy()
+
+    # Squeeze channel dim if present
+    if cooA.ndim == 3 and cooA.shape[1] == 1:
+        cooA = cooA.squeeze(1)
+    if cooP.ndim == 3 and cooP.shape[1] == 1:
+        cooP = cooP.squeeze(1)
+    if ophase.ndim == 3 and ophase.shape[1] == 1:
+        ophase = ophase.squeeze(1)
+
+    is_single = (cooA.ndim == 1)
+    if is_single:
+        cooA = cooA[np.newaxis, :]
+        cooP = cooP[np.newaxis, :]
+        ophase = ophase[np.newaxis, :]
+        q = q[np.newaxis, ...]
+
+    B, L = cooA.shape
+    h_inert_22 = np.empty((B, L), dtype=np.complex128)
+
+    for b in range(B):
+        # 1. Unscale phase to radians
+        phi_orb = ophase[b].astype(np.float64) * norm_phase
+
+        # 2. Orbital phase rotation quaternion R_z(phi) = (cos(phi/2), 0, 0, sin(phi/2))
+        q_rot = np.zeros((4, L), dtype=np.float64)
+        q_rot[0] = np.cos(phi_orb / 2.0)
+        q_rot[3] = np.sin(phi_orb / 2.0)
+
+        # 3. Full rotation quaternion R = q_copr (x) R_z
+        q_b = q[b].astype(np.float64)
+        q_full = multiplyQuats(q_b, q_rot)
+
+        # 4. Normalize full quaternion to unit sphere
+        q_norm = np.linalg.norm(q_full, axis=0, keepdims=True) + 1e-12
+        q_full = q_full / q_norm
+
+        # 5. Co-orbital modes array (2, -2..2)
+        # h_{2,2} = A * exp(-i * phase * norm_phase), h_{2,-2} = (h_{2,2})*
+        h_22_coorb = np.clip(cooA[b], 0.0, None).astype(np.float64) * np.exp(
+            -1j * cooP[b].astype(np.float64) * norm_phase
+        )
+        h_modes = np.zeros((5, L), dtype=np.complex128)
+        h_modes[0] = np.conj(h_22_coorb)  # (2, -2)
+        h_modes[4] = h_22_coorb           # (2, 2)
+
+        # 6. Rotate to inertial frame
+        h_inert_22[b] = rotateWaveform(q_full, h_modes)[4]
+
+    return h_inert_22[0] if is_single else h_inert_22
+
+
+def compute_inertial_mismatches(
+    pred_cooA,
+    pred_cooP,
+    pred_ophase,
+    pred_q,
+    true_inertial,
+    true_cooA=None,
+    true_cooP=None,
+    true_ophase=None,
+    true_q=None,
+    swap_component: str = None,
+    norm_phase: float = 100.0,
 ):
     """
-    Finds valid (kernel_size, stride, padding) configurations to map in_length -> out_length,
-    along with total learnable parameters and an instantiated nn.ConvTranspose1d layer.
+    Computes inertial-frame mismatches between reconstructed waveforms and true_inertial waveforms.
+    Supports modular leave-one-out swapping:
+      swap_component:
+        - None: all predicted components
+        - 'ophase': swap predicted ophase with true_ophase
+        - 'q': swap predicted q with true_q
+        - 'coo': swap predicted (cooA, cooP) with true_(cooA, cooP)
+        - 'cooA': swap predicted cooA with true_cooA
+        - 'cooP': swap predicted cooP with true_cooP
     """
-    candidates = []
-    for stride in [1, 2, 4, 8]:
-        for kernel_size in range(2, 50):
-            for padding in range(kernel_size):
-                l_out = (in_length - 1) * stride - 2 * padding + kernel_size
-                if l_out == out_length:
-                    num_params = in_channels * out_channels * kernel_size + (out_channels if bias else 0)
-                    candidates.append({
-                        "kernel_size": kernel_size,
-                        "stride": stride,
-                        "padding": padding,
-                        "trainable_params": num_params,
-                        "layer": nn.ConvTranspose1d(
-                            in_channels=in_channels,
-                            out_channels=out_channels,
-                            kernel_size=kernel_size,
-                            stride=stride,
-                            padding=padding,
-                            bias=bias,
-                        ),
-                    })
-    return candidates
+    eff_cooA = true_cooA if (swap_component in ('coo', 'cooA') and true_cooA is not None) else pred_cooA
+    eff_cooP = true_cooP if (swap_component in ('coo', 'cooP') and true_cooP is not None) else pred_cooP
+    eff_ophase = true_ophase if (swap_component == 'ophase' and true_ophase is not None) else pred_ophase
+    eff_q = true_q if (swap_component == 'q' and true_q is not None) else pred_q
+
+    rec_inertial = reconstruct_inertial_waveform(
+        eff_cooA, eff_cooP, eff_ophase, eff_q, norm_phase=norm_phase
+    )
+
+    if not isinstance(rec_inertial, torch.Tensor):
+        rec_t = torch.from_numpy(rec_inertial)
+    else:
+        rec_t = rec_inertial
+
+    if not isinstance(true_inertial, torch.Tensor):
+        true_t = torch.from_numpy(true_inertial)
+    else:
+        true_t = true_inertial
+
+    match = TasosOverlapTorch(true_t, rec_t)
+    mismatch = torch.clamp(1.0 - match, min=0.0)
+    return mismatch.cpu().numpy().astype(np.float64)
 
 
-def train_one_epoch(model, optimizer, loss_fn, device, epoch_index, tb_writer, loader, lambda_latent: float = 0.0):
-    model.train(True)
-    dtype = next(model.parameters()).dtype
-    total_loss = 0.0
-
-    for i, batch in enumerate(loader):
-        weights = None
-        if isinstance(batch, (list, tuple)):
-            if len(batch) > 1:
-                inputs, weights = batch[0], batch[1]
-                weights = weights.to(device=device, dtype=dtype)
-            else:
-                inputs = batch[0]
-        else:
-            inputs = batch
-        inputs = inputs.to(device=device, dtype=dtype)
-        if inputs.ndim == 2:
-            inputs = inputs.unsqueeze(1)
-
-        optimizer.zero_grad()
-        if lambda_latent > 0.0:
-            outputs, z = model(inputs, return_latent=True)
-            recon_loss = loss_fn(outputs, inputs, weights) if weights is not None else loss_fn(outputs, inputs)
-            l2_latent_reg = torch.mean(z ** 2)
-            loss = recon_loss + lambda_latent * l2_latent_reg
-        else:
-            outputs = model(inputs)
-            recon_loss = loss_fn(outputs, inputs, weights) if weights is not None else loss_fn(outputs, inputs)
-            loss = recon_loss
-
-        loss.backward()
-        optimizer.step()
-
-        total_loss += loss.item()
-        if tb_writer is not None and i % 10 == 9:
-            tb_x = epoch_index * len(loader) + i + 1
-            tb_writer.add_scalar("Loss/train", loss.item(), tb_x)
-
-    return total_loss / max(len(loader), 1)
-
+# ==============================================================================
+# SECTION 3: Custom Loss Functions
+# ==============================================================================
 
 class WeightedSmoothL1Loss(nn.Module):
     """
@@ -168,269 +253,6 @@ class L1WeightLoss(nn.Module):
 
     def forward(self, inputs, outputs):
         return torch.mean(self.weights * torch.abs(inputs - outputs))
-
-
-def validate(model, val_loader, loss_fn, device=None, lambda_latent: float = 0.0):
-    if device is None:
-        device = next(model.parameters()).device
-    model.eval()
-    dtype = next(model.parameters()).dtype
-    running_vloss = 0.0
-    with torch.no_grad():
-        for i, vbatch in enumerate(val_loader):
-            weights = None
-            if isinstance(vbatch, (list, tuple)):
-                if len(vbatch) > 1:
-                    vinputs, weights = vbatch[0], vbatch[1]
-                    weights = weights.to(device=device, dtype=dtype)
-                else:
-                    vinputs = vbatch[0]
-            else:
-                vinputs = vbatch
-            vinputs = vinputs.to(device=device, dtype=dtype)
-            if vinputs.ndim == 2:
-                vinputs = vinputs.unsqueeze(1)
-            if lambda_latent > 0.0:
-                voutputs, z = model(vinputs, return_latent=True)
-                recon_loss = loss_fn(voutputs, vinputs, weights) if weights is not None else loss_fn(voutputs, vinputs)
-                vloss = recon_loss + lambda_latent * torch.mean(z ** 2)
-            else:
-                voutputs = model(vinputs)
-                vloss = loss_fn(voutputs, vinputs, weights) if weights is not None else loss_fn(voutputs, vinputs)
-            running_vloss += vloss.item()
-    return running_vloss / max(len(val_loader), 1)
-
-
-def train_one_epoch_maesmatch(
-    model_amplitude,
-    model_phase,
-    opt_amplitude,
-    opt_phase,
-    loss_fn_joint,
-    loss_fn_ampl,
-    loss_fn_phase,
-    device,
-    epoch_index,
-    tb_writer,
-    loader,
-    lambda_latent: float = 0.0,
-    lambda_joint: float = 0.1,
-    norm: float = 100.0,
-):
-    """
-    Trains amplitude and phase autoencoders jointly using:
-      1) Dedicated L1WeightLoss on amplitude (breaks sign degeneracy)
-      2) Dedicated L1WeightLoss on unwrapped phase (breaks 2*pi wrapping degeneracy)
-      3) Strictly positive AESurLoss on the reconstructed complex waveform (maximizes GW overlap)
-    Returns:
-      (avg_ampl_total_loss, avg_phase_total_loss, avg_joint_waveform_loss)
-    """
-    model_amplitude.train(True)
-    model_phase.train(True)
-    dtype = next(model_amplitude.parameters()).dtype
-
-    total_ampl_loss = 0.0
-    total_phase_loss = 0.0
-    total_joint_loss = 0.0
-
-    for i, (b_ampl, b_phase) in enumerate(loader):
-        b_ampl = b_ampl.to(device=device, dtype=dtype)
-        b_phase = b_phase.to(device=device, dtype=dtype)
-        if b_ampl.ndim == 2:
-            b_ampl = b_ampl.unsqueeze(1)
-        if b_phase.ndim == 2:
-            b_phase = b_phase.unsqueeze(1)
-
-        opt_amplitude.zero_grad()
-        opt_phase.zero_grad()
-
-        if lambda_latent > 0.0:
-            pred_ampl, z_ampl = model_amplitude(b_ampl, return_latent=True)
-            pred_phase, z_phase = model_phase(b_phase, return_latent=True)
-            reg_ampl = lambda_latent * torch.mean(z_ampl ** 2)
-            reg_phase = lambda_latent * torch.mean(z_phase ** 2)
-        else:
-            pred_ampl = model_amplitude(b_ampl)
-            pred_phase = model_phase(b_phase)
-            reg_ampl = 0.0
-            reg_phase = 0.0
-
-        # 1. Dedicated direct reconstruction losses
-        loss_ampl_direct = loss_fn_ampl(pred_ampl, b_ampl) + reg_ampl
-        loss_phase_direct = loss_fn_phase(pred_phase, b_phase) + reg_phase
-
-        # 2. Reconstruct polar complex waveforms: A * exp(-i * phase * norm)
-        # Clamp amplitude >= 0 for polar conversion to prevent negative modulus flips
-        true_wf = torch.polar(b_ampl.squeeze(1), -b_phase.squeeze(1) * norm)
-        pred_wf = torch.polar(torch.clamp(pred_ampl.squeeze(1), min=0.0), -pred_phase.squeeze(1) * norm)
-
-        loss_joint = loss_fn_joint(pred_wf, true_wf)
-
-        # 3. Combined objective: each model gets its direct gradient + shared waveform overlap gradient
-        loss = loss_ampl_direct + loss_phase_direct + lambda_joint * loss_joint
-
-        loss.backward()
-        opt_amplitude.step()
-        opt_phase.step()
-
-        # Track effective per-branch loss (direct + weighted joint)
-        ampl_branch_loss = (loss_ampl_direct + lambda_joint * loss_joint).item()
-        phase_branch_loss = (loss_phase_direct + lambda_joint * loss_joint).item()
-
-        total_ampl_loss += ampl_branch_loss
-        total_phase_loss += phase_branch_loss
-        total_joint_loss += loss_joint.item()
-
-        if tb_writer is not None and i % 10 == 9:
-            tb_x = epoch_index * len(loader) + i + 1
-            tb_writer.add_scalar("Loss/train_ampl_maesmatch", ampl_branch_loss, tb_x)
-            tb_writer.add_scalar("Loss/train_phase_maesmatch", phase_branch_loss, tb_x)
-            tb_writer.add_scalar("Loss/train_joint_only", loss_joint.item(), tb_x)
-
-    n = max(len(loader), 1)
-    return total_ampl_loss / n, total_phase_loss / n, total_joint_loss / n
-
-
-def validate_maesmatch(
-    model_amplitude,
-    model_phase,
-    val_loader,
-    loss_fn_joint,
-    loss_fn_ampl,
-    loss_fn_phase,
-    device=None,
-    lambda_latent: float = 0.0,
-    lambda_joint: float = 0.1,
-    norm: float = 100.0,
-):
-    """
-    Validates amplitude and phase autoencoders both individually and jointly on reconstructed complex waveforms.
-    Returns:
-      (avg_val_ampl_loss, avg_val_phase_loss, avg_val_joint_loss)
-    """
-    if device is None:
-        device = next(model_amplitude.parameters()).device
-    model_amplitude.eval()
-    model_phase.eval()
-    dtype = next(model_amplitude.parameters()).dtype
-
-    running_vloss_ampl = 0.0
-    running_vloss_phase = 0.0
-    running_vloss_joint = 0.0
-
-    with torch.no_grad():
-        for i, (vb_ampl, vb_phase) in enumerate(val_loader):
-            vb_ampl = vb_ampl.to(device=device, dtype=dtype)
-            vb_phase = vb_phase.to(device=device, dtype=dtype)
-            if vb_ampl.ndim == 2:
-                vb_ampl = vb_ampl.unsqueeze(1)
-            if vb_phase.ndim == 2:
-                vb_phase = vb_phase.unsqueeze(1)
-
-            if lambda_latent > 0.0:
-                pred_ampl, z_ampl = model_amplitude(vb_ampl, return_latent=True)
-                pred_phase, z_phase = model_phase(vb_phase, return_latent=True)
-                reg_ampl = lambda_latent * torch.mean(z_ampl ** 2)
-                reg_phase = lambda_latent * torch.mean(z_phase ** 2)
-            else:
-                pred_ampl = model_amplitude(vb_ampl)
-                pred_phase = model_phase(vb_phase)
-                reg_ampl = 0.0
-                reg_phase = 0.0
-
-            vloss_ampl_direct = loss_fn_ampl(pred_ampl, vb_ampl) + reg_ampl
-            vloss_phase_direct = loss_fn_phase(pred_phase, vb_phase) + reg_phase
-
-            true_wf = torch.polar(vb_ampl.squeeze(1), -vb_phase.squeeze(1) * norm)
-            pred_wf = torch.polar(torch.clamp(pred_ampl.squeeze(1), min=0.0), -pred_phase.squeeze(1) * norm)
-
-            vloss_joint = loss_fn_joint(pred_wf, true_wf)
-
-            running_vloss_ampl += (vloss_ampl_direct + lambda_joint * vloss_joint).item()
-            running_vloss_phase += (vloss_phase_direct + lambda_joint * vloss_joint).item()
-            running_vloss_joint += vloss_joint.item()
-
-    n = max(len(val_loader), 1)
-    return running_vloss_ampl / n, running_vloss_phase / n, running_vloss_joint / n
-
-
-def plot_training_curves(epochs, train_losses, val_losses, lrs, run_title, metric_name, output_path):
-    fig, ax = plt.subplots(figsize=(10, 6), dpi=300)
-    fig.patch.set_facecolor("#ffffff")
-    ax.set_facecolor("#ffffff")
-
-    # Secondary y-axis for learning rate
-    ax_lr = ax.twinx()
-
-    # Curves: Blue (Train), Red (Validation) on primary axis
-    l1 = ax.plot(epochs, train_losses, label="Train Loss", color="#1f77b4", linewidth=1.1)
-    l2 = ax.plot(epochs, val_losses, label="Validation Loss", color="#d62728", linewidth=1.1)
-
-    # Learning Rate (Black dashed) on secondary axis
-    l3 = ax_lr.plot(epochs, lrs, label="Learning Rate", color="black", linewidth=1.3, linestyle="--")
-
-    # Both y-axes are logarithmic
-    ax.set_yscale("log")
-    ax_lr.set_yscale("log")
-
-    # Minimum validation loss marker and horizontal line
-    min_vloss_idx = int(np.argmin(val_losses))
-    min_vloss = val_losses[min_vloss_idx]
-    best_epoch = epochs[min_vloss_idx]
-
-    ax.axhline(y=min_vloss, color="#d62728", linestyle=":", linewidth=1, alpha=0.85)
-    ax.scatter([best_epoch], [min_vloss], color="#d62728", s=55, zorder=5)
-
-    # Offset tag annotation
-    offset_y = min_vloss * 1.6 if min_vloss * 1.6 < max(val_losses) else min_vloss * 0.7
-    ax.annotate(
-        f"Min Val Loss: {min_vloss:.6e}\n(Epoch {best_epoch})",
-        xy=(best_epoch, min_vloss),
-        xytext=(best_epoch, offset_y),
-        arrowprops=dict(facecolor="black", shrink=0.08, width=1, headwidth=5),
-        bbox=dict(boxstyle="round,pad=0.35", edgecolor="#d62728", facecolor="#fff5f5", alpha=0.95),
-        fontsize=9,
-        fontweight="bold",
-    )
-
-    ax.set_title(f"{run_title} - {metric_name} Training Curves", fontsize=13, fontweight="bold", pad=12)
-    ax.set_xlabel("Epoch", fontsize=11, fontweight="semibold")
-    ax.set_ylabel("Loss (Log Scale)", fontsize=11, fontweight="semibold", color="#d62728")
-    ax_lr.set_ylabel("Learning Rate (Log Scale)", fontsize=11, fontweight="semibold", color="black")
-    ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.45)
-
-    # Combine legends from both axes
-    lines = l1 + l2 + l3
-    labels = [l.get_label() for l in lines]
-    ax.legend(lines, labels, frameon=True, facecolor="#ffffff", edgecolor="#cccccc", fontsize=10, loc="upper right")
-
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=300)
-    plt.close(fig)
-    print(f"Plot saved: {output_path}")
-
-
-
-def TasosOverlapTorch(h1, h2, dt=2 * 4.925794970773135e-06, eps: float = 1e-12):
-    '''
-    dt is 2M_odot in seconds.
-    df is the frequency resolution.
-    Promotes FFT and inner product to complex128/float64 so 1.0 - match does not
-    suffer from float32 precision loss (~1e-7) when computing mismatches down to 1e-12.
-    Output belongs to [-1, 1]: 1 is perfect match, 0 is orthogonal, -1 is phase-inverted.
-    '''
-    h1_d = h1.to(torch.complex128)
-    h2_d = h2.to(torch.complex128)
-    h1_f = torch.fft.fft(h1_d, dim=-1) * dt
-    h2_f = torch.fft.fft(h2_d, dim=-1) * dt
-    df = 1.0 / (h1.shape[-1] * dt)
-    sig_norm = 4.0 * df
-    sig1 = torch.sqrt(torch.sum((h1_f.conj() * h1_f).real, dim=-1) * sig_norm + eps)
-    sig2 = torch.sqrt(torch.sum((h2_f.conj() * h2_f).real, dim=-1) * sig_norm + eps)
-    norm = 1.0 / (sig1 * sig2 + eps)
-    inner = torch.sum((h1_f.conj() * h2_f).real, dim=-1)
-    overl = 4.0 * df * inner * norm
-    return torch.clamp(overl, min=-1.0, max=1.0)
 
 
 def maesmatchLoss(true_waveforms, predicted_waveforms, eps: float = 1e-7):
@@ -488,93 +310,80 @@ class AESurLoss(nn.Module):
         return maesmatchLoss(true_waveforms, predicted_waveforms, eps=self.eps)
 
 
-def compute_mismatches(model_amplitude, model_phase, loader, device=None, norm: float = 100.0):
-    """
-    Evaluates Amplitude and Phase Autoencoders over a DataLoader yielding (amplitude, phase),
-    reconstructs physical polar waveforms h = A * exp(-i * phase * norm), and calculates
-    individual waveform mismatches M = 1 - Overlap.
-    """
+# ==============================================================================
+# SECTION 4: Training & Validation Engine
+# ==============================================================================
+
+def train_one_epoch(model, optimizer, loss_fn, device, epoch_index, tb_writer, loader, lambda_latent: float = 0.0):
+    model.train(True)
+    dtype = next(model.parameters()).dtype
+    total_loss = 0.0
+
+    for i, batch in enumerate(loader):
+        weights = None
+        if isinstance(batch, (list, tuple)):
+            if len(batch) > 1:
+                inputs, weights = batch[0], batch[1]
+                weights = weights.to(device=device, dtype=dtype)
+            else:
+                inputs = batch[0]
+        else:
+            inputs = batch
+        inputs = inputs.to(device=device, dtype=dtype)
+        if inputs.ndim == 2:
+            inputs = inputs.unsqueeze(1)
+
+        optimizer.zero_grad()
+        if lambda_latent > 0.0:
+            outputs, z = model(inputs, return_latent=True)
+            recon_loss = loss_fn(outputs, inputs, weights) if weights is not None else loss_fn(outputs, inputs)
+            l2_latent_reg = torch.mean(z ** 2)
+            loss = recon_loss + lambda_latent * l2_latent_reg
+        else:
+            outputs = model(inputs)
+            recon_loss = loss_fn(outputs, inputs, weights) if weights is not None else loss_fn(outputs, inputs)
+            loss = recon_loss
+
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        if tb_writer is not None and i % 10 == 9:
+            tb_x = epoch_index * len(loader) + i + 1
+            tb_writer.add_scalar("Loss/train", loss.item(), tb_x)
+
+    return total_loss / max(len(loader), 1)
+
+
+def validate(model, val_loader, loss_fn, device=None, lambda_latent: float = 0.0):
     if device is None:
-        device = next(model_amplitude.parameters()).device
-    model_amplitude.eval()
-    model_phase.eval()
-    dtype = next(model_amplitude.parameters()).dtype
-
-    mismatches = []
+        device = next(model.parameters()).device
+    model.eval()
+    dtype = next(model.parameters()).dtype
+    running_vloss = 0.0
     with torch.no_grad():
-        for b_ampl, b_phase in loader:
-            b_ampl = b_ampl.to(device=device, dtype=dtype)
-            b_phase = b_phase.to(device=device, dtype=dtype)
-            if b_ampl.ndim == 2:
-                b_ampl = b_ampl.unsqueeze(1)
-            if b_phase.ndim == 2:
-                b_phase = b_phase.unsqueeze(1)
-
-            pred_ampl = model_amplitude(b_ampl)
-            pred_phase = model_phase(b_phase)
-
-            true_wf = torch.polar(b_ampl.squeeze(1), -b_phase.squeeze(1) * norm)
-            pred_wf = torch.polar(torch.clamp(pred_ampl.squeeze(1), min=0.0), -pred_phase.squeeze(1) * norm)
-
-            match = TasosOverlapTorch(true_wf, pred_wf)
-            mismatch = torch.clamp(1.0 - match, min=0.0)
-            mismatches.extend(mismatch.cpu().numpy().tolist())
-
-    return np.array(mismatches, dtype=np.float64)
-
-
-def plot_mismatch_distribution(mismatches, run_title: str, output_path: str):
-    """
-    Plots the mismatch distribution histogram:
-      - X-axis: log scale from 10^-8 to 10^0 ("Mismatch")
-      - Y-axis: counts from 0 to 4000 ("Count")
-      - DPI: 300
-      - Title: "Mismatch distributions for the model-generated waveforms"
-      - Subtitle: "Left: distribution for the autoencoder reconstruction of the NRHybSur3dq8"
-    """
-    fig, ax = plt.subplots(figsize=(8, 6), dpi=300)
-    fig.patch.set_facecolor("#ffffff")
-    ax.set_facecolor("#ffffff")
-
-    bins = np.logspace(-8, 0, 81)
-    clipped_mismatches = np.clip(mismatches, 1e-8, 1.0)
-    counts, _, _ = ax.hist(clipped_mismatches, bins=bins, color="#2b5c8f", edgecolor="#173559", alpha=0.85)
-
-    ax.set_xscale("log")
-    ax.set_xlim(1e-8, 1.0)
-    max_count = int(np.max(counts)) if len(counts) > 0 else 0
-    ax.set_ylim(0, max(4000, int(max_count * 1.15)))
-
-    ax.set_xlabel("Mismatch", fontsize=12, fontweight="bold")
-    ax.set_ylabel("Count", fontsize=12, fontweight="bold")
-    ax.set_title(
-        f"Mismatch distributions for the model-generated waveforms\n"
-        f"Distribution for the autoencoder reconstruction ({run_title})",
-        fontsize=11,
-        fontweight="bold",
-        pad=12,
-    )
-
-    med = np.median(mismatches)
-    mean_val = np.mean(mismatches)
-    max_val = np.max(mismatches)
-    stats_text = f"Median: {med:.2e}\nMean: {mean_val:.2e}\nMax: {max_val:.2e}\nSamples: {len(mismatches)}"
-    ax.text(
-        0.03,
-        0.95,
-        stats_text,
-        transform=ax.transAxes,
-        verticalalignment="top",
-        fontsize=9,
-        fontweight="bold",
-        bbox=dict(boxstyle="round,pad=0.4", edgecolor="#2b5c8f", facecolor="#f0f5fa", alpha=0.9),
-    )
-
-    ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.4)
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=300)
-    plt.close(fig)
-    print(f"Mismatch distribution plot saved: {output_path}")
+        for i, vbatch in enumerate(val_loader):
+            weights = None
+            if isinstance(vbatch, (list, tuple)):
+                if len(vbatch) > 1:
+                    vinputs, weights = vbatch[0], vbatch[1]
+                    weights = weights.to(device=device, dtype=dtype)
+                else:
+                    vinputs = vbatch[0]
+            else:
+                vinputs = vbatch
+            vinputs = vinputs.to(device=device, dtype=dtype)
+            if vinputs.ndim == 2:
+                vinputs = vinputs.unsqueeze(1)
+            if lambda_latent > 0.0:
+                voutputs, z = model(vinputs, return_latent=True)
+                recon_loss = loss_fn(voutputs, vinputs, weights) if weights is not None else loss_fn(voutputs, vinputs)
+                vloss = recon_loss + lambda_latent * torch.mean(z ** 2)
+            else:
+                voutputs = model(vinputs)
+                vloss = loss_fn(voutputs, vinputs, weights) if weights is not None else loss_fn(voutputs, vinputs)
+            running_vloss += vloss.item()
+    return running_vloss / max(len(val_loader), 1)
 
 
 class EarlyStopping:
@@ -663,6 +472,242 @@ class EarlyStopping:
 
         return self.early_stop
 
+
+# ==============================================================================
+# SECTION 5: Plotting, Diagnostics & Data Utilities
+# ==============================================================================
+
+def plot_training_curves(epochs, train_losses, val_losses, lrs, run_title, metric_name, output_path):
+    fig, ax = plt.subplots(figsize=(10, 6), dpi=300)
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
+
+    # Secondary y-axis for learning rate
+    ax_lr = ax.twinx()
+
+    # Curves: Blue (Train), Red (Validation) on primary axis
+    l1 = ax.plot(epochs, train_losses, label="Train Loss", color="#1f77b4", linewidth=1.1)
+    l2 = ax.plot(epochs, val_losses, label="Validation Loss", color="#d62728", linewidth=1.1)
+
+    # Learning Rate (Black dashed) on secondary axis
+    l3 = ax_lr.plot(epochs, lrs, label="Learning Rate", color="black", linewidth=1.3, linestyle="--")
+
+    # Both y-axes are logarithmic
+    ax.set_yscale("log")
+    ax_lr.set_yscale("log")
+
+    # Minimum validation loss marker and horizontal line
+    min_vloss_idx = int(np.argmin(val_losses))
+    min_vloss = val_losses[min_vloss_idx]
+    best_epoch = epochs[min_vloss_idx]
+
+    ax.axhline(y=min_vloss, color="#d62728", linestyle=":", linewidth=1, alpha=0.85)
+    ax.scatter([best_epoch], [min_vloss], color="#d62728", s=55, zorder=5)
+
+    # Offset tag annotation
+    offset_y = min_vloss * 1.6 if min_vloss * 1.6 < max(val_losses) else min_vloss * 0.7
+    ax.annotate(
+        f"Min Val Loss: {min_vloss:.6e}\n(Epoch {best_epoch})",
+        xy=(best_epoch, min_vloss),
+        xytext=(best_epoch, offset_y),
+        arrowprops=dict(facecolor="black", shrink=0.08, width=1, headwidth=5),
+        bbox=dict(boxstyle="round,pad=0.35", edgecolor="#d62728", facecolor="#fff5f5", alpha=0.95),
+        fontsize=9,
+        fontweight="bold",
+    )
+
+    ax.set_title(f"{run_title} - {metric_name} Training Curves", fontsize=13, fontweight="bold", pad=12)
+    ax.set_xlabel("Epoch", fontsize=11, fontweight="semibold")
+    ax.set_ylabel("Loss (Log Scale)", fontsize=11, fontweight="semibold", color="#d62728")
+    ax_lr.set_ylabel("Learning Rate (Log Scale)", fontsize=11, fontweight="semibold", color="black")
+    ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.45)
+
+    # Combine legends from both axes
+    lines = l1 + l2 + l3
+    labels = [l.get_label() for l in lines]
+    ax.legend(lines, labels, frameon=True, facecolor="#ffffff", edgecolor="#cccccc", fontsize=10, loc="upper right")
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+    print(f"Plot saved: {output_path}")
+
+
+def plot_coorbital_training_curves(history, component_names, run_title, output_path):
+    """
+    Plots a unified 2x3 grid of training curves for the 6 CoorbitalAE submodules:
+    Each subplot shows Train Loss (Blue), Validation Loss (Red), Learning Rate (Black dashed, twinx),
+    and marks the minimum validation loss with an annotated pointer.
+    """
+    epochs = history["epoch"]
+    nrows, ncols = 2, 3
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(16, 9), dpi=300)
+    fig.patch.set_facecolor("#ffffff")
+
+    axes_flat = axes.flatten()
+
+    for idx, comp in enumerate(component_names):
+        ax = axes_flat[idx]
+        ax.set_facecolor("#ffffff")
+        ax_lr = ax.twinx()
+
+        train_l = history[f"train_loss_{comp}"]
+        val_l = history[f"val_loss_{comp}"]
+        lrs = history[f"lr_{comp}"]
+
+        l1 = ax.plot(epochs, train_l, label="Train Loss", color="#1f77b4", linewidth=1.1)
+        l2 = ax.plot(epochs, val_l, label="Val Loss", color="#d62728", linewidth=1.1)
+        l3 = ax_lr.plot(epochs, lrs, label="LR", color="black", linewidth=1.1, linestyle="--")
+
+        ax.set_yscale("log")
+        ax_lr.set_yscale("log")
+
+        # Minimum validation loss marker and annotation
+        min_vloss_idx = int(np.argmin(val_l))
+        min_vloss = val_l[min_vloss_idx]
+        best_epoch = epochs[min_vloss_idx]
+
+        ax.axhline(y=min_vloss, color="#d62728", linestyle=":", linewidth=0.9, alpha=0.85)
+        ax.scatter([best_epoch], [min_vloss], color="#d62728", s=35, zorder=5)
+
+        offset_y = min_vloss * 1.8 if min_vloss * 1.8 < max(val_l) else min_vloss * 0.6
+        ax.annotate(
+            f"Min: {min_vloss:.2e}\n(Ep {best_epoch})",
+            xy=(best_epoch, min_vloss),
+            xytext=(best_epoch, offset_y),
+            arrowprops=dict(facecolor="black", shrink=0.08, width=0.8, headwidth=4),
+            bbox=dict(boxstyle="round,pad=0.25", edgecolor="#d62728", facecolor="#fff5f5", alpha=0.9),
+            fontsize=7.5,
+            fontweight="bold",
+        )
+
+        ax.set_title(f"Submodule: {comp.upper()}", fontsize=11, fontweight="bold", pad=8)
+        ax.set_xlabel("Epoch", fontsize=9, fontweight="semibold")
+        ax.set_ylabel("Loss (Log Scale)", fontsize=9, fontweight="semibold", color="#d62728")
+        ax_lr.set_ylabel("LR", fontsize=9, fontweight="semibold", color="black")
+        ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.45)
+
+        lines = l1 + l2 + l3
+        labels = [l.get_label() for l in lines]
+        ax.legend(lines, labels, frameon=True, facecolor="#ffffff", edgecolor="#cccccc", fontsize=8, loc="upper right")
+
+    fig.suptitle(f"{run_title} - CoorbitalAE Training Curves (6 Submodules)", fontsize=14, fontweight="bold", y=0.99)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+    print(f"Unified 6-subplot training curves plot saved: {output_path}")
+
+
+def plot_mismatch_distribution(mismatches, run_title: str, output_path: str):
+    """
+    Plots the mismatch distribution histogram:
+      - X-axis: log scale from 10^-8 to 10^0 ("Mismatch")
+      - Y-axis: counts from 0 to 4000 ("Count")
+      - DPI: 300
+    """
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=300)
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
+
+    bins = np.logspace(-8, 0, 81)
+    clipped_mismatches = np.clip(mismatches, 1e-8, 1.0)
+    counts, _, _ = ax.hist(clipped_mismatches, bins=bins, color="#2b5c8f", edgecolor="#173559", alpha=0.85)
+
+    ax.set_xscale("log")
+    ax.set_xlim(1e-8, 1.0)
+    max_count = int(np.max(counts)) if len(counts) > 0 else 0
+    ax.set_ylim(0, max(3000, int(max_count * 1.15)))
+
+    ax.set_xlabel("Mismatch", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Count", fontsize=12, fontweight="bold")
+    ax.set_title(
+        f"Mismatch distributions for the model-generated waveforms\n"
+        f"Distribution for the autoencoder reconstruction ({run_title})",
+        fontsize=11,
+        fontweight="bold",
+        pad=12,
+    )
+
+    med = np.median(mismatches)
+    mean_val = np.mean(mismatches)
+    max_val = np.max(mismatches)
+    stats_text = f"Median: {med:.2e}\nMean: {mean_val:.2e}\nMax: {max_val:.2e}\nSamples: {len(mismatches)}"
+    ax.text(
+        0.03,
+        0.95,
+        stats_text,
+        transform=ax.transAxes,
+        verticalalignment="top",
+        fontsize=9,
+        fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.4", edgecolor="#2b5c8f", facecolor="#f0f5fa", alpha=0.9),
+    )
+
+    ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.4)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+    print(f"Mismatch distribution plot saved: {output_path}")
+
+
+def plot_inertial_mismatch_ablation(mismatches_dict, run_title: str, output_path: str):
+    """
+    Plots an overlay of inertial mismatch distributions comparing the full model against
+    leave-one-out component replacements (inspired by Fig. 8 in Pürrer et al. 2026):
+      - 'Full NN': Blue solid
+      - 'ophase -> truth': Red solid
+      - 'q -> truth': Green solid
+      - 'coo -> truth': Orange solid
+    """
+    fig, ax = plt.subplots(figsize=(8.5, 6), dpi=300)
+    fig.patch.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
+
+    colors = {
+        "Full NN": "#1f77b4",
+        "ophase -> truth": "#d62728",
+        "q -> truth": "#2ca02c",
+        "coo -> truth": "#ff7f0e",
+    }
+
+    bins = np.logspace(-7, 0, 71)
+
+    for name, mm in mismatches_dict.items():
+        color = colors.get(name, "#444444")
+        clipped = np.clip(mm, 1e-7, 1.0)
+        med = float(np.median(mm))
+        p95 = float(np.percentile(mm, 95))
+
+        ax.hist(
+            clipped,
+            bins=bins,
+            histtype="step",
+            color=color,
+            linewidth=1.7,
+            label=f"{name} (med: {med:.1e}, p95: {p95:.1e})",
+        )
+        ax.axvline(med, color=color, linestyle=":", linewidth=1.1, alpha=0.85)
+
+    ax.set_xscale("log")
+    ax.set_xlim(1e-7, 1.0)
+    ax.set_xlabel("Inertial Waveform Mismatch (1 - Overlap)", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Count", fontsize=11, fontweight="bold")
+    ax.set_title(
+        f"Inertial Waveform Mismatch & Error Attribution (Leave-One-Out)\n{run_title}",
+        fontsize=12,
+        fontweight="bold",
+        pad=12,
+    )
+    ax.legend(frameon=True, facecolor="#ffffff", edgecolor="#cccccc", fontsize=8.5, loc="upper right")
+    ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.45)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=300)
+    plt.close(fig)
+    print(f"Inertial mismatch ablation plot saved: {output_path}")
+
+
+# --- Data Sampling & NR Loading Helpers ---
 
 def get_NR_data(group, key):
     if key == "waveform":
