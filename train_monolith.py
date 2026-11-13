@@ -18,7 +18,7 @@ torch.backends.cudnn.allow_tf32 = False
 
 
 
-from models import AutoencoderW
+from models import AutoencoderMono
 from utils import (
     get_phase,
     train_one_epoch,
@@ -32,7 +32,7 @@ from utils import (
 # ---------------------------------------------------------------------------
 # CLI Arguments (Minimal Execution Controls)
 # ---------------------------------------------------------------------------
-parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Phase (SOAP)")
+parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude and Phase (SOAP, AutoencoderMono)")
 parser.add_argument("--title", type=str, default=None, help="Run title / prefix for output files")
 parser.add_argument("--epochs", type=int, default=5000, help="Training epochs (default: 5000)")
 parser.add_argument("--early_stop", type=int, default=300, help="Early stopping patience in epochs (default: 300, 0 to disable)")
@@ -45,9 +45,9 @@ if not title:
     except EOFError:
         title = ""
     if not title:
-        title = f"AE_soap_w_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        title = f"AE_mono_soap_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-model_name = "AutoencoderW"
+model_name = "AutoencoderMono"
 print(f"=== Starting Run: {title} | Model: {model_name} | Optimizer: SOAP | Scheduler: PLATEAU | Epochs: {args.epochs} ===")
 
 # ---------------------------------------------------------------------------
@@ -106,8 +106,8 @@ p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 # Models, Loss Functions & Regularization
 # ---------------------------------------------------------------------------
 
-raw_model_amplitude = AutoencoderW().to(device)
-raw_model_phase = AutoencoderW().to(device)
+raw_model_amplitude = AutoencoderMono().to(device)
+raw_model_phase = AutoencoderMono().to(device)
 
 if sys.version_info >= (3, 13):
     print("Notice: torch.compile/Dynamo is not supported on Python 3.13+. Continuing with uncompiled models.")
@@ -126,25 +126,25 @@ else:
 # Dedicated per-branch losses
 loss_fn_amplitude = nn.SmoothL1Loss(beta=1e-3)
 loss_fn_phase = nn.SmoothL1Loss(beta=1e-3)
-lambda_latent = 1e-6
+lambda_latent = 0.0
 
 # ---------------------------------------------------------------------------
 # Optimizers (Hardcoded SOAP) & Schedulers (Hardcoded Plateau)
 # ---------------------------------------------------------------------------
 opt_fn_amplitude = opt_add.SOAP(
     model_amplitude.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
-    weight_decay=0.0, precondition_frequency=25, merge_dims=False, eps=0.0001
+    weight_decay=0.0, precondition_frequency=40, merge_dims=False, eps=0.0001
 )
 opt_fn_phase = opt_add.SOAP(
     model_phase.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
-    weight_decay=0.0, precondition_frequency=25, merge_dims=False, eps=0.0001
+    weight_decay=0.0, precondition_frequency=40, merge_dims=False, eps=0.0001
 )
 
 scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
-    opt_fn_amplitude, factor=0.5, patience=100, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=25
+    opt_fn_amplitude, factor=0.5, patience=150, threshold=0.003, threshold_mode="rel", min_lr=5e-7, cooldown=50
 )
 scheduler_phase = lr_scheduler.ReduceLROnPlateau(
-    opt_fn_phase, factor=0.5, patience= 100, threshold=0.005, threshold_mode="rel", min_lr=5e-7, cooldown=25
+    opt_fn_phase, factor=0.5, patience= 150, threshold=0.003, threshold_mode="rel", min_lr=5e-7, cooldown=50
 )
 
 # ---------------------------------------------------------------------------

@@ -105,7 +105,7 @@ class FullModel(nn.Module):
     Total parameters: Dependent on submodules
         - e.g. EvenBiggerMapper (99,136) + DecoderNOBN (150,897) = 250,033
         - e.g. EvenBiggerMapper (99,136) + DecoderBig (284,969) = 384,105
-        - e.g. EvenBiggerMapper (99,136) + DecoderW (249,201) = 348,337
+        - e.g. EvenBiggerMapper (99,136) + DecoderW (174,081) = 273,217
     """
     def __init__(self, mapper: nn.Module, decoder: nn.Module):
         super().__init__()
@@ -149,80 +149,110 @@ class ResidualPhaseAutoencoder(nn.Module):
         return rec_res + self.mean_phase
 
 
-
-
-
-class EncoderBig(nn.Module):
+class ResBlock1D(nn.Module):
     """
-    Wider 1D CNN Encoder for single-channel input without BatchNorm (bias=True).
-    Dimensions: 2048 -> 1043 -> 530 -> 270 -> 138 -> 35 -> 64.
-    Channels: 1 -> 24 -> 48 -> 96 -> 192 -> 16 -> 64 (bottleneck).
-    Parameters: 275,320
+    Intra-layer 1D residual block (x + F(x)) at fixed temporal resolution.
+    Preserves boundary coverage via replicate padding.
     """
-    def __init__(self):
+    def __init__(self, channels: int, kernel_size: int = 7):
         super().__init__()
-        self.c1 = nn.Conv1d(in_channels= 1, out_channels=24, kernel_size=40, stride=2, padding=38, padding_mode= "replicate") # out length = 1043
-        self.c2 = nn.Conv1d(in_channels= 24, out_channels=48, kernel_size=20, stride=2, padding=18, padding_mode= "replicate") # out length = 530
-        self.c3 = nn.Conv1d(in_channels=48, out_channels=96, kernel_size=12, stride=2, padding=10, padding_mode= "replicate") # out length = 270
-        self.c4 = nn.Conv1d(in_channels=96, out_channels=192, kernel_size=8, stride=2, padding=6, padding_mode= "replicate") # out length = 138
-        self.c5 = nn.Conv1d(in_channels=192, out_channels=16, kernel_size=4, stride=4, padding=2, padding_mode= "replicate") # out length = 35
-        self.fc = nn.Linear(in_features=16 * 35, out_features=64)
+        self.conv1 = nn.Conv1d(in_channels=channels, out_channels=channels, kernel_size=kernel_size, padding="same", padding_mode="replicate")
+        self.conv2 = nn.Conv1d(in_channels=channels, out_channels=channels, kernel_size=kernel_size, padding="same", padding_mode="replicate")
         self.act = nn.GELU()
 
     def forward(self, x):
+        residual = x
+        x = self.act(self.conv1(x))
+        x = self.conv2(x)
+        return self.act(x + residual)
+
+
+class EncoderMono(nn.Module):
+    """
+    1D CNN Encoder with widened bottleneck (latent shape = (14, 18), dimension = 252) without BatchNorm (bias=True).
+    Dimensions: 2048 -> 1043 -> 530 -> 270 -> 138 -> 35 -> 18.
+    Channels: 1 -> 32 -> 32 -> 64 -> 128 -> 32 -> 14.
+    Parameters: 130,350
+    """
+    def __init__(self):
+        super().__init__()
+        self.c1 = nn.Conv1d(in_channels=1, out_channels=32, kernel_size=40, stride=2, padding=38, padding_mode="replicate") # out length = 1043
+        self.c2 = nn.Conv1d(in_channels=32, out_channels=32, kernel_size=20, stride=2, padding=18, padding_mode="replicate") # out length = 530
+        self.c3 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=12, stride=2, padding=10, padding_mode="replicate") # out length = 270
+        self.c4 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=8, stride=2, padding=6, padding_mode="replicate") # out length = 138
+        self.c5 = nn.Conv1d(in_channels=128, out_channels=32, kernel_size=4, stride=4, padding=2, padding_mode="replicate") # out length = 35
+        self.c6 = nn.Conv1d(in_channels=32, out_channels=14, kernel_size=4, stride=2, padding=2, padding_mode="replicate") # out length = 18
+        self.act = nn.GELU()
+
+    def forward(self, x):
+        if x.ndim == 2:
+            x = x.unsqueeze(1)
         x = self.act(self.c1(x))
         x = self.act(self.c2(x))
         x = self.act(self.c3(x))
         x = self.act(self.c4(x))
         x = self.act(self.c5(x))
-        return self.fc(torch.flatten(x, start_dim=1))
+        return self.c6(x)
 
 
-class DecoderBig(nn.Module):
+class DecoderMono(nn.Module):
     """
-    Wider 1D CNN Decoder for single-channel output without BatchNorm (bias=True).
-    Dimensions: 64 -> (16, 32) -> 128 -> 256 -> 512 -> 1024 -> 2048.
-    Channels: 64 (bottleneck) -> (16, 32) -> 192 -> 96 -> 48 -> 24 -> 1.
-    Zero output_padding across all transposed convolutions.
-    Parameters: 284,969
+    1D CNN Decoder with widened bottleneck (latent shape = (14, 18), dimension = 252) without BatchNorm (bias=True).
+    Dimensions: 18 -> 35 -> 138 -> 270 -> 530 -> 1043 -> 2048.
+    Channels: 14 -> 32 -> 128 -> 64 -> 48 -> 32 -> 32 -> 1.
+    Uses linear upsampling followed by standard Conv1d and ResBlock1D.
+    Parameters: 271,121
     """
     def __init__(self):
         super().__init__()
-        self.fc = nn.Linear(in_features=64, out_features=16 * 32)
-        self.ct5 = nn.ConvTranspose1d(in_channels=16, out_channels=192, kernel_size=8, stride=4, padding=2) # out length = 128
-        self.ct4 = nn.ConvTranspose1d(in_channels=192, out_channels=96, kernel_size=8, stride=2, padding=3)  # out length = 256
-        self.ct3 = nn.ConvTranspose1d(in_channels=96, out_channels=48, kernel_size=12, stride=2, padding=5) # out length = 512
-        self.ct2 = nn.ConvTranspose1d(in_channels=48, out_channels=24, kernel_size=20, stride=2, padding=9) # out length = 1024
-        self.ct1 = nn.ConvTranspose1d(in_channels=24, out_channels=1, kernel_size=40, stride=2, padding=19) # out length = 2048
+        self.u6 = nn.Upsample(size=35, mode="linear", align_corners=False)
+        self.c6 = nn.Conv1d(in_channels=14, out_channels=32, kernel_size=5, padding="same", padding_mode="replicate")
+        self.u5 = nn.Upsample(size=138, mode="linear", align_corners=False)
+        self.c5 = nn.Conv1d(in_channels=32, out_channels=128, kernel_size=7, padding="same", padding_mode="replicate")
+        self.u4 = nn.Upsample(size=270, mode="linear", align_corners=False)
+        self.c4 = nn.Conv1d(in_channels=128, out_channels=64, kernel_size=9, padding="same", padding_mode="replicate")
+        self.u3 = nn.Upsample(size=530, mode="linear", align_corners=False)
+        self.c3 = nn.Conv1d(in_channels=64, out_channels=48, kernel_size=13, padding="same", padding_mode="replicate")
+        self.res3 = ResBlock1D(channels=48, kernel_size=5)
+        self.u2 = nn.Upsample(size=1043, mode="linear", align_corners=False)
+        self.c2 = nn.Conv1d(in_channels=48, out_channels=32, kernel_size=21, padding="same", padding_mode="replicate")
+        self.res2 = ResBlock1D(channels=32, kernel_size=7)
+        self.u1 = nn.Upsample(size=2048, mode="linear", align_corners=False)
+        self.c1 = nn.Conv1d(in_channels=32, out_channels=32, kernel_size=41, padding="same", padding_mode="replicate")
+        self.res1 = ResBlock1D(channels=32, kernel_size=7)
+        self.head = nn.Conv1d(in_channels=32, out_channels=1, kernel_size=1)
         self.act = nn.GELU()
 
     def forward(self, x):
-        x = self.fc(x)
-        x = x.view(-1, 16, 32)
-        x = self.act(self.ct5(x))
-        x = self.act(self.ct4(x))
-        x = self.act(self.ct3(x))
-        x = self.act(self.ct2(x))
-        return self.ct1(x)
+        if x.ndim == 2:
+            x = x.view(-1, 14, 18)
+        x = self.act(self.c6(self.u6(x)))
+        x = self.act(self.c5(self.u5(x)))
+        x = self.act(self.c4(self.u4(x)))
+        x = self.res3(self.act(self.c3(self.u3(x))))
+        x = self.res2(self.act(self.c2(self.u2(x))))
+        x = self.res1(self.act(self.c1(self.u1(x))))
+        return self.head(x)
 
-class AutoencoderBig(nn.Module):
+
+class AutoencoderMono(nn.Module):
     """
-    Wider 1D CNN Autoencoder without BatchNorm (bias=True) and with zero output_padding in the decoder.
-    Total parameters: 560,289 (EncoderBig: 275,320, DecoderBig: 284,969)
+    1D CNN Autoencoder with widened bottleneck (latent shape = (14, 18), dimension = 252)
+    Total parameters: 401,471 (EncoderMono: 130,350, DecoderMono: 271,121)
     """
     def __init__(self):
         super().__init__()
-        self.encoder = EncoderBig()
-        self.decoder = DecoderBig()
+        self.encoder = EncoderMono()
+        self.decoder = DecoderMono()
 
     def forward(self, x, return_latent: bool = False):
+        if x.ndim == 2:
+            x = x.unsqueeze(1)
         z = self.encoder(x)
         out = self.decoder(z)
         if return_latent:
             return out, z
         return out
-
-
 
 
 class EncoderW(nn.Module):
@@ -233,15 +263,17 @@ class EncoderW(nn.Module):
     """
     def __init__(self):
         super().__init__()
-        self.c1 = nn.Conv1d(in_channels= 1, out_channels=16, kernel_size=40, stride=2, padding=38, padding_mode= "replicate") # out length = 1043
-        self.c2 = nn.Conv1d(in_channels= 16, out_channels=32, kernel_size=20, stride=2, padding=18, padding_mode= "replicate") # out length = 530
-        self.c3 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=12, stride=2, padding=10, padding_mode= "replicate") # out length = 270
-        self.c4 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=8, stride=2, padding=6, padding_mode= "replicate") # out length = 138
-        self.c5 = nn.Conv1d(in_channels=128, out_channels=16, kernel_size=4, stride=4, padding=2, padding_mode= "replicate") # out length = 35
+        self.c1 = nn.Conv1d(in_channels=1, out_channels=16, kernel_size=40, stride=2, padding=38, padding_mode="replicate")
+        self.c2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=20, stride=2, padding=18, padding_mode="replicate")
+        self.c3 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=12, stride=2, padding=10, padding_mode="replicate")
+        self.c4 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=8, stride=2, padding=6, padding_mode="replicate")
+        self.c5 = nn.Conv1d(in_channels=128, out_channels=16, kernel_size=4, stride=4, padding=2, padding_mode="replicate")
         self.fc = nn.Linear(in_features=16 * 35, out_features=256)
         self.act = nn.GELU()
 
     def forward(self, x):
+        if x.ndim == 2:
+            x = x.unsqueeze(1)
         x = self.act(self.c1(x))
         x = self.act(self.c2(x))
         x = self.act(self.c3(x))
@@ -260,11 +292,11 @@ class DecoderW(nn.Module):
     def __init__(self):
         super().__init__()
         self.fc = nn.Linear(in_features=256, out_features=16 * 32)
-        self.ct5 = nn.ConvTranspose1d(in_channels=16, out_channels=128, kernel_size=8, stride=4, padding=2) # out length = 128
-        self.ct4 = nn.ConvTranspose1d(in_channels=128, out_channels=64, kernel_size=8, stride=2, padding=3)  # out length = 256
-        self.ct3 = nn.ConvTranspose1d(in_channels=64, out_channels=32, kernel_size=12, stride=2, padding=5) # out length = 512
-        self.ct2 = nn.ConvTranspose1d(in_channels=32, out_channels=16, kernel_size=20, stride=2, padding=9) # out length = 1024
-        self.ct1 = nn.ConvTranspose1d(in_channels=16, out_channels=1, kernel_size=40, stride=2, padding=19) # out length = 2048
+        self.ct5 = nn.ConvTranspose1d(in_channels=16, out_channels=128, kernel_size=8, stride=4, padding=2)
+        self.ct4 = nn.ConvTranspose1d(in_channels=128, out_channels=64, kernel_size=8, stride=2, padding=3)
+        self.ct3 = nn.ConvTranspose1d(in_channels=64, out_channels=32, kernel_size=12, stride=2, padding=5)
+        self.ct2 = nn.ConvTranspose1d(in_channels=32, out_channels=16, kernel_size=20, stride=2, padding=9)
+        self.ct1 = nn.ConvTranspose1d(in_channels=16, out_channels=1, kernel_size=40, stride=2, padding=19)
         self.act = nn.GELU()
 
     def forward(self, x):
@@ -288,6 +320,8 @@ class AutoencoderW(nn.Module):
         self.decoder = DecoderW()
 
     def forward(self, x, return_latent: bool = False):
+        if x.ndim == 2:
+            x = x.unsqueeze(1)
         z = self.encoder(x)
         out = self.decoder(z)
         if return_latent:
