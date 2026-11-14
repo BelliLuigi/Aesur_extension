@@ -1,10 +1,10 @@
 universe        = vanilla
 executable      = train.sh
 
-# Default parameters (override on CLI via: key=value)
-script          = train_coorbital_ae.py
-title           = run_$(Cluster)
-extra_args      =
+# Default parameters (CLI key=value overrides these via $(var:default) syntax)
+script          = $(script:train_coorbital_ae.py)
+title           = $(title:run_$(Cluster))
+extra_args      = $(extra_args:)
 
 arguments       = $(script) --title $(title) $(extra_args)
 
