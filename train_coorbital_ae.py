@@ -132,6 +132,7 @@ parser.add_argument("--early_stop", type=int, default=EARLY_STOP, help="Early st
 parser.add_argument("--lr", type=float, default=LR, help="Initial learning rate (default: 5e-3)")
 parser.add_argument("--clip_norm", type=float, default=1.0, help="Gradient clipping norm threshold (default: 1.0, 0 to disable)")
 parser.add_argument("--clamp_logfreq", type=float, default=4.0, help="Symmetric clamp threshold for normalized logfreq (default: 4.0, 0 to disable)")
+parser.add_argument("--clamp_coop", type=float, default=6.0, help="Symmetric clamp threshold for normalized cooP (default: 6.0, 0 to disable)")
 args = parser.parse_args()
 
 title = args.title
@@ -239,6 +240,10 @@ print(f"  cooP   -> mean={mu_cooP:.4f}, std={std_cooP:.4f} rad")
 
 ophase_arr = (ophase_arr - mu_ophase) / std_ophase
 cooP_arr   = (cooP_arr - mu_cooP) / std_cooP
+if args.clamp_coop > 0:
+    n_clamped_coop = int((np.abs(cooP_arr) > args.clamp_coop).sum())
+    cooP_arr = np.clip(cooP_arr, -args.clamp_coop, args.clamp_coop)
+    print(f"Clamped {n_clamped_coop} cooP outliers to [-{args.clamp_coop}, {args.clamp_coop}] ({100 * n_clamped_coop / cooP_arr.size:.3f}%).")
 
 # 2. Normalize logfreq using train-set per-timestep mean and standard deviation
 mu_logf = logfreq_arr[train_indices, 0, :].mean(axis=0)
