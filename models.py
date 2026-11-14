@@ -332,55 +332,89 @@ class AutoencoderW(nn.Module):
 
 class FlexE(nn.Module):
     """
-    Parametric 1D CNN Encoder with configurable bottleneck, width multiplier, and input channels.
-    Dimensions: 2048 -> 1043 -> 530 -> 270 -> 138 -> 35 -> bottleneck.
-    Parameters (default: bottleneck=64, width=1, channels=1): 44,460
+    Parametric 1D CNN Encoder with decoupled:
+      - channels: input signal dimension (1 for scalar, 4 for quaternion, 3 for spins)
+      - width: internal hidden channel capacity multiplier (width=1.0 matches EncoderMono: 130k params)
+      - bottleneck: latent channel count at temporal length 18 (latent shape: (B, bottleneck, 18))
     """
-    def __init__(self, bottleneck=64, width=1, channels=1):
+    def __init__(self, bottleneck=14, width=1.0, channels=1):
         super().__init__()
-        wxc = int(ceil(width*channels))
-        self.c1 = nn.Conv1d(in_channels= channels, out_channels=4*wxc, kernel_size=40, stride=2, padding=38, padding_mode= "replicate") # out length = 1043
-        self.c2 = nn.Conv1d(in_channels= 4*wxc, out_channels=8*wxc, kernel_size=20, stride=2, padding=18, padding_mode= "replicate") # out length = 530
-        self.c3 = nn.Conv1d(in_channels=8*wxc, out_channels=16*wxc, kernel_size=12, stride=2, padding=10, padding_mode= "replicate") # out length = 270
-        self.c4 = nn.Conv1d(in_channels=16*wxc, out_channels=32*wxc, kernel_size=8, stride=2, padding=6, padding_mode= "replicate") # out length = 138
-        self.c5 = nn.Conv1d(in_channels=32*wxc, out_channels=16, kernel_size=4, stride=4, padding=2, padding_mode= "replicate") # out length = 35
-        self.fc = nn.Linear(in_features=16 * 35, out_features=bottleneck)
+        self.bottleneck = bottleneck if not isinstance(bottleneck, (tuple, list)) else bottleneck[0]
+        self.width = width
+        self.channels = channels
+
+        # Hidden layer channels scale with width, decoupled from input signal channels
+        c_32 = max(8, int(round(32 * width)))
+        c_64 = max(16, int(round(64 * width)))
+        c_128 = max(32, int(round(128 * width)))
+
+        # Conv hierarchy: 2048 -> 1043 -> 530 -> 270 -> 138 -> 35 -> 18
+        self.c1 = nn.Conv1d(channels, c_32, kernel_size=40, stride=2, padding=38, padding_mode="replicate")
+        self.c2 = nn.Conv1d(c_32, c_32, kernel_size=20, stride=2, padding=18, padding_mode="replicate")
+        self.c3 = nn.Conv1d(c_32, c_64, kernel_size=12, stride=2, padding=10, padding_mode="replicate")
+        self.c4 = nn.Conv1d(c_64, c_128, kernel_size=8, stride=2, padding=6, padding_mode="replicate")
+        self.c5 = nn.Conv1d(c_128, c_32, kernel_size=4, stride=4, padding=2, padding_mode="replicate")
+        self.c6 = nn.Conv1d(c_32, self.bottleneck, kernel_size=4, stride=2, padding=2, padding_mode="replicate")
         self.act = nn.GELU()
 
     def forward(self, x):
+        if x.ndim == 2:
+            x = x.unsqueeze(1)
         x = self.act(self.c1(x))
         x = self.act(self.c2(x))
         x = self.act(self.c3(x))
         x = self.act(self.c4(x))
         x = self.act(self.c5(x))
-        return self.fc(torch.flatten(x, start_dim=1))
+        return self.c6(x)
 
 
 class FlexD(nn.Module):
     """
-    Parametric 1D CNN Decoder with configurable bottleneck, width multiplier, and output channels.
-    Dimensions: bottleneck -> (16, 32) -> 128 -> 256 -> 512 -> 1024 -> 2048.
-    Parameters (default: bottleneck=64, width=1, channels=1): 43,869
+    Parametric 1D CNN Decoder with decoupled:
+      - bottleneck: latent channel count at temporal length 18 (latent shape: (B, bottleneck, 18))
+      - width: internal hidden channel capacity multiplier (width=1.0 matches DecoderMono: 271k params)
+      - channels: output signal dimension (1 for scalar, 4 for quaternion, 3 for spins)
     """
-    def __init__(self, bottleneck, width, channels=1):
+    def __init__(self, bottleneck=14, width=1.0, channels=1):
         super().__init__()
-        wxc = int(ceil(width*channels))
-        self.fc = nn.Linear(in_features=bottleneck, out_features=16 * 32)
-        self.ct5 = nn.ConvTranspose1d(in_channels=16, out_channels=32*wxc, kernel_size=8, stride=4, padding=2) # out length = 128
-        self.ct4 = nn.ConvTranspose1d(in_channels=32*wxc, out_channels=16*wxc, kernel_size=8, stride=2, padding=3)  # out length = 256
-        self.ct3 = nn.ConvTranspose1d(in_channels=16*wxc, out_channels=8*wxc, kernel_size=12, stride=2, padding=5) # out length = 512
-        self.ct2 = nn.ConvTranspose1d(in_channels=8*wxc, out_channels=4*wxc, kernel_size=20, stride=2, padding=9) # out length = 1024
-        self.ct1 = nn.ConvTranspose1d(in_channels=4*wxc, out_channels=channels, kernel_size=40, stride=2, padding=19) # out length = 2048
+        self.bottleneck = bottleneck if not isinstance(bottleneck, (tuple, list)) else bottleneck[0]
+        self.width = width
+        self.channels = channels
+
+        c_32 = max(8, int(round(32 * width)))
+        c_48 = max(12, int(round(48 * width)))
+        c_64 = max(16, int(round(64 * width)))
+        c_128 = max(32, int(round(128 * width)))
+
+        # Linear upsampling + Conv + ResBlock hierarchy: 18 -> 35 -> 138 -> 270 -> 530 -> 1043 -> 2048
+        self.u6 = nn.Upsample(size=35, mode="linear", align_corners=False)
+        self.c6 = nn.Conv1d(self.bottleneck, c_32, kernel_size=5, padding="same", padding_mode="replicate")
+        self.u5 = nn.Upsample(size=138, mode="linear", align_corners=False)
+        self.c5 = nn.Conv1d(c_32, c_128, kernel_size=7, padding="same", padding_mode="replicate")
+        self.u4 = nn.Upsample(size=270, mode="linear", align_corners=False)
+        self.c4 = nn.Conv1d(c_128, c_64, kernel_size=9, padding="same", padding_mode="replicate")
+        self.u3 = nn.Upsample(size=530, mode="linear", align_corners=False)
+        self.c3 = nn.Conv1d(c_64, c_48, kernel_size=13, padding="same", padding_mode="replicate")
+        self.res3 = ResBlock1D(channels=c_48, kernel_size=5)
+        self.u2 = nn.Upsample(size=1043, mode="linear", align_corners=False)
+        self.c2 = nn.Conv1d(c_48, c_32, kernel_size=21, padding="same", padding_mode="replicate")
+        self.res2 = ResBlock1D(channels=c_32, kernel_size=7)
+        self.u1 = nn.Upsample(size=2048, mode="linear", align_corners=False)
+        self.c1 = nn.Conv1d(c_32, c_32, kernel_size=41, padding="same", padding_mode="replicate")
+        self.res1 = ResBlock1D(channels=c_32, kernel_size=7)
+        self.head = nn.Conv1d(c_32, channels, kernel_size=1)
         self.act = nn.GELU()
 
     def forward(self, x):
-        x = self.fc(x)
-        x = x.view(-1, 16, 32)
-        x = self.act(self.ct5(x))
-        x = self.act(self.ct4(x))
-        x = self.act(self.ct3(x))
-        x = self.act(self.ct2(x))
-        return self.ct1(x)
+        if x.ndim == 2:
+            x = x.view(-1, self.bottleneck, 18)
+        x = self.act(self.c6(self.u6(x)))
+        x = self.act(self.c5(self.u5(x)))
+        x = self.act(self.c4(self.u4(x)))
+        x = self.res3(self.act(self.c3(self.u3(x))))
+        x = self.res2(self.act(self.c2(self.u2(x))))
+        x = self.res1(self.act(self.c1(self.u1(x))))
+        return self.head(x)
 
 
 
@@ -388,28 +422,36 @@ class FlexD(nn.Module):
 class CoorbitalAE(nn.Module):
     """
     Modular 1D CNN Autoencoder decomposing precessing waveforms into co-orbital kinematics and dynamics.
-    Total parameters: 861,021 across 12 submodules (6 encoders + 6 decoders):
-        - ophase (bottleneck=8,  width=0.5, ch=1): E_ophase (13,044)  + D_ophase (15,197)  = 28,241
-        - q      (bottleneck=48, width=1.0, ch=4): E_q (138,288)     + D_q (144,628)      = 282,916
-        - chi1   (bottleneck=48, width=1.0, ch=3): E_chi1 (91,156)   + D_chi1 (95,447)    = 186,603
-        - chi2   (bottleneck=64, width=1.0, ch=3): E_chi2 (100,132)  + D_chi2 (103,639)   = 203,771
-        - cooA   (bottleneck=48, width=1.0, ch=1): E_cooA (35,484)   + D_cooA (35,677)    = 71,161
-        - cooP   (bottleneck=64, width=1.0, ch=1): E_cooP (44,460)   + D_cooP (43,869)    = 88,329
+    Total parameters: ~655k across 12 submodules (6 encoders + 6 decoders with Mono architecture):
+        - ophase (btnk=1, width=0.25, ch=1): E (8,361)   + D (16,957)  = 25,318   (18 dims)
+        - q      (btnk=2, width=0.50, ch=4): E (34,578)  + D (67,580)  = 102,158  (36 dims)
+        - chi1   (btnk=2, width=0.50, ch=3): E (33,938)  + D (67,563)  = 101,501  (36 dims)
+        - chi2   (btnk=2, width=0.50, ch=3): E (33,938)  + D (67,563)  = 101,501  (36 dims)
+        - cooA   (btnk=2, width=0.50, ch=1): E (32,658)  + D (67,529)  = 100,187  (36 dims)
+        - cooP   (btnk=4, width=0.75, ch=1): E (72,988)  + D (151,837) = 224,825  (72 dims)
+    Total latent dimensions across all 6 branches: 234 dims
     """
-    def __init__(self):
+    def __init__(self, bottlenecks: dict = None, widths: dict = None):
         super().__init__()
-        self.E_ophase = FlexE(bottleneck=8, width=0.5, channels=1)
-        self.D_ophase = FlexD(bottleneck=8, width=0.5, channels=1)
-        self.E_q = FlexE(bottleneck=48, width=1, channels=4)
-        self.D_q = FlexD(bottleneck=48, width=1, channels=4)
-        self.E_chi1 = FlexE(bottleneck=48, width=1, channels=3)
-        self.D_chi1 =  FlexD(bottleneck=48, width=1, channels=3)
-        self.E_chi2 =  FlexE(bottleneck=64, width=1, channels=3)
-        self.D_chi2 =  FlexD(bottleneck=64, width=1, channels=3)
-        self.E_cooA =  FlexE(bottleneck=48, width=1, channels=1)
-        self.D_cooA =  FlexD(bottleneck=48, width=1, channels=1)
-        self.E_cooP =  FlexE(bottleneck=64, width=1, channels=1)
-        self.D_cooP =   FlexD(bottleneck=64, width=1, channels=1)
+        b_cfg = {"ophase": 1, "q": 2, "chi1": 2, "chi2": 2, "cooA": 2, "cooP": 4}
+        w_cfg = {"ophase": 0.25, "q": 0.5, "chi1": 0.5, "chi2": 0.5, "cooA": 0.5, "cooP": 0.75}
+        if bottlenecks:
+            b_cfg.update(bottlenecks)
+        if widths:
+            w_cfg.update(widths)
+
+        self.E_ophase = FlexE(bottleneck=b_cfg["ophase"], width=w_cfg["ophase"], channels=1)
+        self.D_ophase = FlexD(bottleneck=b_cfg["ophase"], width=w_cfg["ophase"], channels=1)
+        self.E_q = FlexE(bottleneck=b_cfg["q"], width=w_cfg["q"], channels=4)
+        self.D_q = FlexD(bottleneck=b_cfg["q"], width=w_cfg["q"], channels=4)
+        self.E_chi1 = FlexE(bottleneck=b_cfg["chi1"], width=w_cfg["chi1"], channels=3)
+        self.D_chi1 = FlexD(bottleneck=b_cfg["chi1"], width=w_cfg["chi1"], channels=3)
+        self.E_chi2 = FlexE(bottleneck=b_cfg["chi2"], width=w_cfg["chi2"], channels=3)
+        self.D_chi2 = FlexD(bottleneck=b_cfg["chi2"], width=w_cfg["chi2"], channels=3)
+        self.E_cooA = FlexE(bottleneck=b_cfg["cooA"], width=w_cfg["cooA"], channels=1)
+        self.D_cooA = FlexD(bottleneck=b_cfg["cooA"], width=w_cfg["cooA"], channels=1)
+        self.E_cooP = FlexE(bottleneck=b_cfg["cooP"], width=w_cfg["cooP"], channels=1)
+        self.D_cooP = FlexD(bottleneck=b_cfg["cooP"], width=w_cfg["cooP"], channels=1)
     
     def forward(self, ophase, q, chi1, chi2, cooA, cooP, return_latent: bool = False):
         z_ophase = self.E_ophase(ophase)

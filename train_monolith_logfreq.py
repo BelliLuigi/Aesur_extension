@@ -67,7 +67,11 @@ parser.add_argument("--title", type=str, default=None, help="Run title / prefix 
 parser.add_argument("--epochs", type=int, default=5000, help="Training epochs (default: 5000)")
 parser.add_argument("--early_stop", type=int, default=300, help="Early stopping patience in epochs (default: 300, 0 to disable)")
 parser.add_argument("--batch_size", type=int, default=128, help="Batch size for training (default: 128)")
+parser.add_argument("--samples", type=int, default=None, help="Number of samples to load (default: all)")
 parser.add_argument("--omega_floor", type=float, default=1e-6, help="Floor for instantaneous frequency before log (default: 1e-6)")
+parser.add_argument("--lr", type=float, default=1e-3, help="Initial learning rate for SOAP (default: 1e-3)")
+parser.add_argument("--clip_norm", type=float, default=1.0, help="Gradient clipping norm threshold (default: 1.0, 0 to disable)")
+parser.add_argument("--clamp_target", type=float, default=4.0, help="Symmetric clamp threshold for normalized logfreq (default: 4.0, 0 to disable)")
 args = parser.parse_args()
 
 title = args.title
@@ -103,7 +107,8 @@ if not os.path.exists(filepath):
 print(f"Loading waveforms and computing log-frequency from '{filepath}'...")
 with h5py.File(filepath, "r") as f:
     waveforms_ds = f["Waveforms"]
-    n_samples, sample_len = waveforms_ds.shape
+    total_avail, sample_len = waveforms_ds.shape
+    n_samples = args.samples if args.samples is not None and args.samples < total_avail else total_avail
     logfreq = np.empty((n_samples, sample_len), dtype=np.float32)
 
     chunk_size = 10000
@@ -145,6 +150,12 @@ sd = np.sqrt(np.maximum(sq / len(train_indices) - mu ** 2, 0.0)) + 1e-6
 for s in range(0, n_samples, 5000):
     logfreq[s:s + 5000] = (logfreq[s:s + 5000] - mu) / sd
 
+# Fix 1: Clamp normalized log-frequency to prevent -37 sigma spikes from omega_floor
+if args.clamp_target > 0:
+    n_clamped = int((np.abs(logfreq) > args.clamp_target).sum())
+    logfreq = np.clip(logfreq, -args.clamp_target, args.clamp_target)
+    print(f"Fix 1 applied: clamped {n_clamped} outlier values to [-{args.clamp_target}, {args.clamp_target}] ({100 * n_clamped / logfreq.size:.3f}%).")
+
 # Save normalization constants
 norm_npz_path = f"{title}_logfreq_norm.npz"
 np.savez(norm_npz_path, mu=mu, sd=sd, omega_floor=args.omega_floor)
@@ -181,10 +192,46 @@ loss_fn_logfreq = nn.SmoothL1Loss(beta=1e-3)
 lambda_latent = 0.0
 
 # ---------------------------------------------------------------------------
-# Optimizer (SOAP) & Scheduler (Plateau)
+# Training Step with Gradient Clipping (Fix 2)
+# ---------------------------------------------------------------------------
+def train_one_epoch_logfreq(
+    model, optimizer, loss_fn, device, loader, clip_norm: float = 1.0, lambda_latent: float = 0.0
+):
+    model.train(True)
+    dtype = next(model.parameters()).dtype
+    total_loss = 0.0
+
+    for batch in loader:
+        inputs = batch.to(device=device, dtype=dtype)
+        if inputs.ndim == 2:
+            inputs = inputs.unsqueeze(1)
+
+        optimizer.zero_grad()
+        if lambda_latent > 0.0:
+            outputs, z = model(inputs, return_latent=True)
+            recon_loss = loss_fn(outputs, inputs)
+            loss = recon_loss + lambda_latent * torch.mean(z ** 2)
+        else:
+            outputs = model(inputs)
+            loss = loss_fn(outputs, inputs)
+
+        loss.backward()
+
+        # Fix 2: Clip gradient norm before optimizer step to prevent SOAP instability
+        if clip_norm > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_norm)
+
+        optimizer.step()
+        total_loss += loss.item()
+
+    return total_loss / max(len(loader), 1)
+
+
+# ---------------------------------------------------------------------------
+# Optimizer (SOAP) & Scheduler (Plateau) (Fix 3: lr=args.lr, default 1e-3)
 # ---------------------------------------------------------------------------
 opt_fn_logfreq = opt_add.SOAP(
-    model_logfreq.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
+    model_logfreq.parameters(), lr=args.lr, betas=(0.95, 0.999), shampoo_beta=0.99,
     weight_decay=0.0, precondition_frequency=40, merge_dims=False, eps=0.0001
 )
 scheduler_logfreq = lr_scheduler.ReduceLROnPlateau(
@@ -214,11 +261,12 @@ if args.early_stop > 0:
 else:
     print("Early stopping disabled.")
 
-print(f"Starting training for {args.epochs} epochs...")
+print(f"Starting training for {args.epochs} epochs (LR={args.lr:.1e}, clip_norm={args.clip_norm}, clamp={args.clamp_target})...")
 
 for epoch in range(args.epochs):
-    avg_loss_lf = train_one_epoch(
-        model_logfreq, opt_fn_logfreq, loss_fn_logfreq, device, epoch, None, l_train_loader, lambda_latent=lambda_latent
+    avg_loss_lf = train_one_epoch_logfreq(
+        model_logfreq, opt_fn_logfreq, loss_fn_logfreq, device, l_train_loader,
+        clip_norm=args.clip_norm, lambda_latent=lambda_latent
     )
     avg_vloss_lf = validate(model_logfreq, l_val_loader, loss_fn_logfreq, device=device, lambda_latent=lambda_latent)
     scheduler_logfreq.step(avg_vloss_lf)
