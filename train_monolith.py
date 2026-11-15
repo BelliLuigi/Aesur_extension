@@ -18,7 +18,7 @@ torch.backends.cudnn.allow_tf32 = False
 
 
 
-from models import AutoencoderMono
+from models import AutoencoderMono, init_kaiming_weights
 from utils import (
     get_phase,
     train_one_epoch,
@@ -36,6 +36,9 @@ parser = argparse.ArgumentParser(description="Train 2 Autoencoders for Amplitude
 parser.add_argument("--title", type=str, default=None, help="Run title / prefix for output files")
 parser.add_argument("--epochs", type=int, default=5000, help="Training epochs (default: 5000)")
 parser.add_argument("--early_stop", type=int, default=300, help="Early stopping patience in epochs (default: 300, 0 to disable)")
+parser.add_argument("--batch_size", type=int, default=128, help="Batch size for training (default: 128)")
+parser.add_argument("--samples", type=int, default=None, help="Number of samples to load (default: all)")
+parser.add_argument("--lr", type=float, default=1e-3, help="Initial learning rate for SOAP (default: 1e-3)")
 args = parser.parse_args()
 
 title = args.title
@@ -48,7 +51,7 @@ if not title:
         title = f"AE_mono_soap_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 model_name = "AutoencoderMono"
-print(f"=== Starting Run: {title} | Model: {model_name} | Optimizer: SOAP | Scheduler: PLATEAU | Epochs: {args.epochs} ===")
+print(f"=== Starting Run: {title} | Model: {model_name} | Optimizer: SOAP (eps=1e-8) | LR: {args.lr} | Scheduler: PLATEAU | Epochs: {args.epochs} ===")
 
 # ---------------------------------------------------------------------------
 # Device Configuration
@@ -71,36 +74,85 @@ if not os.path.exists(filepath):
 with h5py.File(filepath, "r") as f:
     waveforms_ds = f["Waveforms"]
     params_ds = f["Parameters"]
-    n_samples, sample_len = waveforms_ds.shape
+    total_avail, sample_len = waveforms_ds.shape
+    n_samples = args.samples if args.samples is not None and args.samples < total_avail else total_avail
     amplitude = np.empty((n_samples, sample_len), dtype=np.float32)
     phase = np.empty((n_samples, sample_len), dtype=np.float32)
-    params = params_ds[:]
+    params = params_ds[:n_samples]
     chunk_size = 10000
     for start in range(0, n_samples, chunk_size):
         end = min(start + chunk_size, n_samples)
         amplitude[start:end] = np.abs(waveforms_ds[start:end]).astype(np.float32)
         phase[start:end] = get_phase(waveforms_ds[start:end]).astype(np.float32)
 
+print(f"Loaded {n_samples} waveforms (length: {sample_len}).")
+
+# Split Dataset (80% train / 10% val / 10% test)
+idx_all = np.arange(n_samples)
+gen = torch.Generator().manual_seed(42)
+j_train_idx, j_val_idx, j_test_idx = random_split(idx_all, [0.8, 0.1, 0.1], generator=gen)
+
+train_indices = np.array(j_train_idx.indices)
+val_indices = np.array(j_val_idx.indices)
+test_indices = np.array(j_test_idx.indices)
+
+print(f"Dataset split: train={len(train_indices)}, val={len(val_indices)}, test={len(test_indices)}")
+
+# Compute per-timestep mean and standard deviation strictly on the training set
+print("Normalizing Amplitude and Phase using train-set per-timestep statistics...")
+mu_ampl = np.zeros(sample_len, dtype=np.float64)
+sq_ampl = np.zeros(sample_len, dtype=np.float64)
+mu_phase = np.zeros(sample_len, dtype=np.float64)
+sq_phase = np.zeros(sample_len, dtype=np.float64)
+
+for s in range(0, len(train_indices), 5000):
+    idx_blk = np.sort(train_indices[s:s + 5000])
+    blk_a = amplitude[idx_blk].astype(np.float64)
+    mu_ampl += blk_a.sum(axis=0)
+    sq_ampl += (blk_a ** 2).sum(axis=0)
+
+    blk_p = phase[idx_blk].astype(np.float64)
+    mu_phase += blk_p.sum(axis=0)
+    sq_phase += (blk_p ** 2).sum(axis=0)
+
+mu_ampl /= len(train_indices)
+sd_ampl = np.sqrt(np.maximum(sq_ampl / len(train_indices) - mu_ampl ** 2, 0.0)) + 1e-6
+
+mu_phase /= len(train_indices)
+sd_phase = np.sqrt(np.maximum(sq_phase / len(train_indices) - mu_phase ** 2, 0.0)) + 1e-6
+
+# Normalize in-place across all samples
+for s in range(0, n_samples, 5000):
+    amplitude[s:s + 5000] = (amplitude[s:s + 5000] - mu_ampl) / sd_ampl
+    phase[s:s + 5000] = (phase[s:s + 5000] - mu_phase) / sd_phase
+
+# Save normalization constants
+norm_npz_path = f"{title}_norm.npz"
+np.savez(
+    norm_npz_path,
+    mu_ampl=mu_ampl,
+    sd_ampl=sd_ampl,
+    mu_phase=mu_phase,
+    sd_phase=sd_phase,
+)
+print(f"Saved normalization constants: {norm_npz_path}")
+
 ampl_tensor = torch.from_numpy(amplitude)
 phase_tensor = torch.from_numpy(phase)
 
-# Split train/val/test once
-joint_dataset = TensorDataset(ampl_tensor, phase_tensor)
-j_train, j_val, j_test = random_split(joint_dataset, [0.8, 0.1, 0.1], generator=torch.Generator().manual_seed(42))
-
 # Derive single-branch subsets using the exact same indices
-a_train = Subset(ampl_tensor, j_train.indices)
-p_train = Subset(phase_tensor, j_train.indices)
-a_val   = Subset(ampl_tensor, j_val.indices)
-p_val   = Subset(phase_tensor, j_val.indices)
+a_train = Subset(ampl_tensor, train_indices)
+p_train = Subset(phase_tensor, train_indices)
+a_val   = Subset(ampl_tensor, val_indices)
+p_val   = Subset(phase_tensor, val_indices)
 
-test_loader = DataLoader(j_test, batch_size=1024, shuffle=False)
+test_joint = TensorDataset(ampl_tensor[test_indices], phase_tensor[test_indices])
+test_loader = DataLoader(test_joint, batch_size=1024, shuffle=False)
 
-a_train_loader = DataLoader(a_train, batch_size=128, shuffle=True)
+a_train_loader = DataLoader(a_train, batch_size=args.batch_size, shuffle=True)
 a_val_loader = DataLoader(a_val, batch_size=2048, shuffle=False)
-p_train_loader = DataLoader(p_train, batch_size=128, shuffle=True)
+p_train_loader = DataLoader(p_train, batch_size=args.batch_size, shuffle=True)
 p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
-
 
 # ---------------------------------------------------------------------------
 # Models, Loss Functions & Regularization
@@ -108,6 +160,8 @@ p_val_loader = DataLoader(p_val, batch_size=2048, shuffle=False)
 
 raw_model_amplitude = AutoencoderMono().to(device)
 raw_model_phase = AutoencoderMono().to(device)
+init_kaiming_weights(raw_model_amplitude)
+init_kaiming_weights(raw_model_phase)
 
 if sys.version_info >= (3, 13):
     print("Notice: torch.compile/Dynamo is not supported on Python 3.13+. Continuing with uncompiled models.")
@@ -129,22 +183,22 @@ loss_fn_phase = nn.SmoothL1Loss(beta=1e-3)
 lambda_latent = 0.0
 
 # ---------------------------------------------------------------------------
-# Optimizers (Hardcoded SOAP) & Schedulers (Hardcoded Plateau)
+# Optimizers (SOAP, eps=1e-8) & Schedulers (Plateau)
 # ---------------------------------------------------------------------------
 opt_fn_amplitude = opt_add.SOAP(
-    model_amplitude.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
-    weight_decay=0.0, precondition_frequency=40, merge_dims=False, eps=0.0001
+    model_amplitude.parameters(), lr=args.lr, betas=(0.95, 0.999), shampoo_beta=0.99,
+    weight_decay=0.0, precondition_frequency=40, merge_dims=False, eps=1e-8
 )
 opt_fn_phase = opt_add.SOAP(
-    model_phase.parameters(), lr=5e-3, betas=(0.95, 0.999), shampoo_beta=0.99,
-    weight_decay=0.0, precondition_frequency=40, merge_dims=False, eps=0.0001
+    model_phase.parameters(), lr=args.lr, betas=(0.95, 0.999), shampoo_beta=0.99,
+    weight_decay=0.0, precondition_frequency=40, merge_dims=False, eps=1e-8
 )
 
 scheduler_amplitude = lr_scheduler.ReduceLROnPlateau(
     opt_fn_amplitude, factor=0.5, patience=150, threshold=0.003, threshold_mode="rel", min_lr=5e-7, cooldown=50
 )
 scheduler_phase = lr_scheduler.ReduceLROnPlateau(
-    opt_fn_phase, factor=0.5, patience= 150, threshold=0.003, threshold_mode="rel", min_lr=5e-7, cooldown=50
+    opt_fn_phase, factor=0.5, patience=150, threshold=0.003, threshold_mode="rel", min_lr=5e-7, cooldown=50
 )
 
 # ---------------------------------------------------------------------------
@@ -313,8 +367,16 @@ print(f"\nLoading best saved models for mismatch evaluation...")
 raw_model_amplitude.load_state_dict(torch.load(best_ampl_path, map_location=device))
 raw_model_phase.load_state_dict(torch.load(best_phase_path, map_location=device))
 
-print("Computing test set waveform mismatches...")
-mismatches = compute_mismatches(model_amplitude, model_phase, test_loader, device=device)
+print("Computing test set waveform mismatches (unnormalized)...")
+norm_stats = {
+    "mu_ampl": mu_ampl,
+    "sd_ampl": sd_ampl,
+    "mu_phase": mu_phase,
+    "sd_phase": sd_phase,
+}
+mismatches = compute_mismatches(
+    model_amplitude, model_phase, test_loader, device=device, norm=100.0, norm_stats=norm_stats
+)
 
 plot_mismatch_filename = f"{title}_mismatch_distribution.png"
 plot_mismatch_distribution(
@@ -328,6 +390,7 @@ print(f"  - Best Amplitude Model:      {title}_amplitude_best.pt")
 print(f"  - Amplitude Full Checkpoint: {title}_amplitude_checkpoint.pt (includes optimizer state)")
 print(f"  - Best Phase Model:          {title}_phase_best.pt")
 print(f"  - Phase Full Checkpoint:     {title}_phase_checkpoint.pt (includes optimizer state)")
+print(f"  - Normalization NPZ (mu,sd): {norm_npz_path}")
 print(f"  - History CSV:               {csv_filename}")
 print(f"  - History NPY:               {npy_filename}")
 print(f"  - Amplitude Plot:            {plot_ampl_filename}")

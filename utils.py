@@ -54,17 +54,34 @@ def TasosOverlapTorch(h1, h2, dt=2 * 4.925794970773135e-06, eps: float = 1e-12):
     return torch.clamp(overl, min=-1.0, max=1.0)
 
 
-def compute_mismatches(model_amplitude, model_phase, loader, device=None, norm: float = 100.0):
+def compute_mismatches(
+    model_amplitude,
+    model_phase,
+    loader,
+    device=None,
+    norm: float = 100.0,
+    norm_stats: dict = None,
+):
     """
     Evaluates Amplitude and Phase Autoencoders over a DataLoader yielding (amplitude, phase),
     reconstructs physical polar waveforms h = A * exp(-i * phase * norm), and calculates
     individual waveform mismatches M = 1 - Overlap.
+    If norm_stats is provided (dict with keys 'mu_ampl', 'sd_ampl', 'mu_phase', 'sd_phase'),
+    unnormalizes predictions and targets before waveform reconstruction.
     """
     if device is None:
         device = next(model_amplitude.parameters()).device
     model_amplitude.eval()
     model_phase.eval()
     dtype = next(model_amplitude.parameters()).dtype
+
+    if norm_stats is not None:
+        mu_a = torch.as_tensor(norm_stats["mu_ampl"], device=device, dtype=dtype).view(1, -1)
+        sd_a = torch.as_tensor(norm_stats["sd_ampl"], device=device, dtype=dtype).view(1, -1)
+        mu_p = torch.as_tensor(norm_stats["mu_phase"], device=device, dtype=dtype).view(1, -1)
+        sd_p = torch.as_tensor(norm_stats["sd_phase"], device=device, dtype=dtype).view(1, -1)
+    else:
+        mu_a, sd_a, mu_p, sd_p = None, None, None, None
 
     mismatches = []
     with torch.no_grad():
@@ -79,8 +96,19 @@ def compute_mismatches(model_amplitude, model_phase, loader, device=None, norm: 
             pred_ampl = model_amplitude(b_ampl)
             pred_phase = model_phase(b_phase)
 
-            true_wf = torch.polar(b_ampl.squeeze(1), -b_phase.squeeze(1) * norm)
-            pred_wf = torch.polar(torch.clamp(pred_ampl.squeeze(1), min=0.0), -pred_phase.squeeze(1) * norm)
+            a_true = b_ampl.squeeze(1)
+            p_true = b_phase.squeeze(1)
+            a_pred = pred_ampl.squeeze(1)
+            p_pred = pred_phase.squeeze(1)
+
+            if norm_stats is not None:
+                a_true = a_true * sd_a + mu_a
+                a_pred = a_pred * sd_a + mu_a
+                p_true = p_true * sd_p + mu_p
+                p_pred = p_pred * sd_p + mu_p
+
+            true_wf = torch.polar(a_true, -p_true * norm)
+            pred_wf = torch.polar(torch.clamp(a_pred, min=0.0), -p_pred * norm)
 
             match = TasosOverlapTorch(true_wf, pred_wf)
             mismatch = torch.clamp(1.0 - match, min=0.0)

@@ -164,7 +164,7 @@ class ResBlock1D(nn.Module):
         residual = x
         x = self.act(self.conv1(x))
         x = self.conv2(x)
-        return self.act(x + residual)
+        return x + residual
 
 
 class EncoderMono(nn.Module):
@@ -235,6 +235,22 @@ class DecoderMono(nn.Module):
         return self.head(x)
 
 
+def init_kaiming_weights(model: nn.Module):
+    """
+    Initializes 1D convolution layers using Kaiming normal initialization with
+    nonlinearity='relu' (fan_in mode) and zeroes out all convolution biases.
+    For the second convolution inside each ResBlock1D, scales initial weights by 0.1x.
+    """
+    for m in model.modules():
+        if isinstance(m, (nn.Conv1d, nn.ConvTranspose1d)):
+            nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="relu")
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+    for m in model.modules():
+        if isinstance(m, ResBlock1D):
+            m.conv2.weight.data.mul_(0.1)
+
+
 class AutoencoderMono(nn.Module):
     """
     1D CNN Autoencoder with widened bottleneck (latent shape = (14, 18), dimension = 252)
@@ -244,6 +260,7 @@ class AutoencoderMono(nn.Module):
         super().__init__()
         self.encoder = EncoderMono()
         self.decoder = DecoderMono()
+        init_kaiming_weights(self)
 
     def forward(self, x, return_latent: bool = False):
         if x.ndim == 2:

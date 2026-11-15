@@ -16,7 +16,7 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.set_float32_matmul_precision('highest')
 torch.backends.cudnn.allow_tf32 = False
 
-from models import AutoencoderMono
+from models import AutoencoderMono, init_kaiming_weights
 from utils import (
     train_one_epoch,
     validate,
@@ -176,6 +176,7 @@ l_test_loader = DataLoader(l_test, batch_size=2048, shuffle=False)
 # Model, Loss Function & Regularization
 # ---------------------------------------------------------------------------
 raw_model_logfreq = AutoencoderMono().to(device)
+init_kaiming_weights(raw_model_logfreq)
 
 if sys.version_info >= (3, 13):
     print("Notice: torch.compile/Dynamo is not supported on Python 3.13+. Continuing with uncompiled model.")
@@ -232,7 +233,7 @@ def train_one_epoch_logfreq(
 # ---------------------------------------------------------------------------
 opt_fn_logfreq = opt_add.SOAP(
     model_logfreq.parameters(), lr=args.lr, betas=(0.95, 0.999), shampoo_beta=0.99,
-    weight_decay=0.0, precondition_frequency=40, merge_dims=False, eps=0.0001
+    weight_decay=0.0, precondition_frequency=40, merge_dims=False, eps=1e-8
 )
 scheduler_logfreq = lr_scheduler.ReduceLROnPlateau(
     opt_fn_logfreq, factor=0.5, patience=150, threshold=0.003, threshold_mode="rel", min_lr=5e-7, cooldown=50
