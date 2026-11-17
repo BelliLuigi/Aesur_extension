@@ -243,3 +243,5 @@ datasets/*
 # Archive / old stuff
 old_stuff/
 .vscode
+datasheet_assets/
+model_weights/

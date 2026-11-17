@@ -13,14 +13,14 @@ from concurrent.futures import ProcessPoolExecutor
 import gwsurrogate
 from gwsurrogate.new.precessing_surrogate import rotateWaveform, quatInv, multiplyQuats
 
-N_TOTAL = 102400
+N_TOTAL = 10240
 NUM_WORKERS = 4
 CHUNKSIZE = 1024
 LENGTH = 2048
 DT = 2.0
 Q_MIN, Q_MAX = 1.0, 4.0
 A_MAX = 0.8
-OUTPUT_PATH = "datasets/NRSur7dq4v2_dataset.hdf"
+OUTPUT_PATH = "datasets/NRSur7dq4v2_dataset_small.hdf"
 
 # ==============================================================================
 # 1. 7D Parameter Sampling: Uniform q + OT-Uniform Ball Spins
