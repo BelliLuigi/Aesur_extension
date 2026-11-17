@@ -11,10 +11,6 @@ from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader, random_split, TensorDataset, Subset
 import pytorch_optimizer as opt_add
 
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.set_float32_matmul_precision('highest')
-torch.backends.cudnn.allow_tf32 = False
-
 from models import CoorbitalAE, init_kaiming_weights
 from utils import (
     plot_coorbital_training_curves,
@@ -43,38 +39,45 @@ def wave_to_phase(w: np.ndarray) -> np.ndarray:
 COO_COMPONENTS = ["ophase", "q", "chi1", "chi2", "cooA", "cooP"]
 ALL_COMPONENTS = COO_COMPONENTS
 
-# ==============================================================================
-# Hyperparameters & Configuration
-# ==============================================================================
-DATASET_PATH     = "datasets/NRSur7dq4v2_dataset.hdf"
-SAMPLES          = None         # None to use all available samples (e.g. 102400)
-EPOCHS           = 5000         # Total training epochs
-BATCH_SIZE       = 128          # Training batch size
-VAL_BATCH_SIZE   = 2048         # Validation & test batch size
-PRECONDITION_FREQ = 15          # SOAP precondition frequency
-BETA             = 0.3          # SmoothL1Loss beta
-LR               = 1e-3         # Initial learning rate for SOAP
-MIN_LR           = 1e-6         # Minimum learning rate floor
-WARMUP_STEPS     = 200          # Linear warmup steps
-EARLY_STOP       = 300          # Early stopping patience (epochs, 0 to disable)
-LAMBDA_LATENT    = 0.0          # L2 latent regularization weight
-
 # ---------------------------------------------------------------------------
-# CLI Arguments
+# CLI Arguments (Minimal Execution Controls)
 # ---------------------------------------------------------------------------
 parser = argparse.ArgumentParser(
     description="Train CoorbitalAE with normalized phases (SOAP optimizer)"
 )
 parser.add_argument("--title", type=str, default=None, help="Run title / prefix for output files")
-parser.add_argument("--epochs", type=int, default=EPOCHS, help="Number of training epochs")
-parser.add_argument("--batch_size", type=int, default=BATCH_SIZE, help="Training batch size")
-parser.add_argument("--samples", type=int, default=SAMPLES, help="Number of samples to load (default: all)")
-parser.add_argument("--early_stop", type=int, default=EARLY_STOP, help="Early stopping patience (default: 300)")
-parser.add_argument("--lr", type=float, default=LR, help="Initial learning rate (default: 1e-3)")
-parser.add_argument("--clip_norm", type=float, default=1.0, help="Gradient clipping norm threshold (default: 1.0, 0 to disable)")
-parser.add_argument("--clamp_coop", type=float, default=0.0, help="Symmetric clamp threshold for normalized cooP (default: 0.0, disabled)")
-parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False, help="Enable torch.compile (default: False)")
+parser.add_argument("--epochs", type=int, default=800, help="Training epochs (default: 800)")
+parser.add_argument("--small", action=argparse.BooleanOptionalAction, default=False, help="Use small dataset variant (NRSur7dq4v2_dataset_small.hdf) (default: False)")
+parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False, help="Enable/disable torch.compile (default: False)")
+parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=False, help="Enable/disable TF32 precision on CUDA (default: False)")
 args = parser.parse_args()
+
+# ---------------------------------------------------------------------------
+# Hardcoded Hyperparameters & Constants
+# ---------------------------------------------------------------------------
+EPOCHS            = args.epochs
+BATCH_SIZE        = 128          # Training batch size
+VAL_BATCH_SIZE    = 2048         # Validation & test batch size
+PRECONDITION_FREQ = 15           # SOAP precondition frequency
+BETA              = 0.3          # SmoothL1Loss beta
+CLIP_NORM         = 1.0          # Gradient clipping norm threshold
+LR                = 1e-3         # Initial learning rate for SOAP
+MIN_LR            = 1e-6         # Minimum learning rate floor
+WARMUP_STEPS      = 200          # Linear warmup steps
+EARLY_STOP        = 0            # Early stopping patience (0 to disable)
+LAMBDA_LATENT     = 0.0          # L2 latent regularization weight
+
+# Configure Precision (TF32 vs. standard FP32)
+if args.tf32 and torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cudnn.allow_tf32 = True
+    print("Precision: TF32 enabled for CUDA matmul and cuDNN.")
+else:
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cudnn.allow_tf32 = False
+    print("Precision: Standard FP32 (highest precision, TF32 disabled).")
 
 title = args.title
 if not title:
@@ -85,14 +88,8 @@ if not title:
     if not title:
         title = f"CoorbitalAE_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-EPOCHS = args.epochs
-BATCH_SIZE = args.batch_size
-SAMPLES = args.samples
-EARLY_STOP = args.early_stop
-LR = args.lr
-
 model_name = "CoorbitalAE"
-print(f"=== Starting Run: {title} | Model: {model_name} | Optimizer: SOAP | Phase: Normalized | Epochs: {EPOCHS} ===")
+print(f"=== Starting Run: {title} | Model: {model_name} | Optimizer: SOAP | Schedule: Warmup+Cosine | Epochs: {EPOCHS} ===")
 
 # ---------------------------------------------------------------------------
 # Device Configuration
@@ -107,14 +104,14 @@ else:
 # ---------------------------------------------------------------------------
 # Load Dataset from HDF5
 # ---------------------------------------------------------------------------
-filepath = DATASET_PATH
+filepath = "datasets/NRSur7dq4v2_dataset_small.hdf" if args.small else "datasets/NRSur7dq4v2_dataset.hdf"
 if not os.path.exists(filepath):
     raise FileNotFoundError(f"Dataset not found at '{filepath}'")
 
-print(f"Loading coorbital kinematics, dynamics, and waveforms from '{filepath}'...")
+print(f"Loading coorbital kinematics, dynamics, and waveforms from '{filepath}' (small={args.small})...")
 with h5py.File(filepath, "r") as f:
     total_avail = f["Waveforms_coorb"].shape[0]
-    n_samples = min(SAMPLES, total_avail) if (SAMPLES and SAMPLES > 0) else total_avail
+    n_samples = total_avail
     sample_len = f["Waveforms_coorb"].shape[1]
 
     ophase_arr  = np.empty((n_samples, 1, sample_len), dtype=np.float32)
@@ -178,10 +175,6 @@ ophase_arr[:, 0, :] = (ophase_arr[:, 0, :] - mu_ophase) / std_ophase
 # 2. Normalize cooP using train-set per-timestep mean and floored standard deviation
 mu_cooP, std_cooP = compute_norm_stats(cooP_arr[:, 0, :], train_indices)
 cooP_arr[:, 0, :] = (cooP_arr[:, 0, :] - mu_cooP) / std_cooP
-if args.clamp_coop > 0:
-    n_clamped_coop = int((np.abs(cooP_arr) > args.clamp_coop).sum())
-    cooP_arr = np.clip(cooP_arr, -args.clamp_coop, args.clamp_coop)
-    print(f"Clamped {n_clamped_coop} cooP outliers to [-{args.clamp_coop}, {args.clamp_coop}] ({100 * n_clamped_coop / cooP_arr.size:.3f}%).")
 
 # 3. Normalize cooA using train-set per-timestep mean and floored standard deviation
 mu_cooA, sd_cooA = compute_norm_stats(cooA_arr[:, 0, :], train_indices)
@@ -374,9 +367,9 @@ for epoch in range(EPOCHS):
             total_active_loss.backward()
             for comp in ALL_COMPONENTS:
                 if not stopped[comp]:
-                    if args.clip_norm > 0:
+                    if CLIP_NORM > 0:
                         params = list(getattr(raw_model, f"E_{comp}").parameters()) + list(getattr(raw_model, f"D_{comp}").parameters())
-                        torch.nn.utils.clip_grad_norm_(params, max_norm=args.clip_norm)
+                        torch.nn.utils.clip_grad_norm_(params, max_norm=CLIP_NORM)
                     optimizers[comp].step()
                     schedulers[comp].step()
 
@@ -524,12 +517,12 @@ for comp in ALL_COMPONENTS:
     collected_trues[comp] = np.concatenate(collected_trues[comp], axis=0)
 
 # Load ground-truth inertial waveforms (2, 2) for the exact test split
-print(f"Loading {len(test_indices)} true inertial waveforms from '{DATASET_PATH}'...")
+print(f"Loading {len(test_indices)} true inertial waveforms from '{filepath}'...")
 sorted_order = np.argsort(test_indices)
 sorted_idx = test_indices[sorted_order]
 inv_order = np.argsort(sorted_order)
 
-with h5py.File(DATASET_PATH, "r") as f:
+with h5py.File(filepath, "r") as f:
     true_inertial = f["Waveforms"][sorted_idx][inv_order]
 
 print("\nComputing inertial waveform mismatches and leave-one-out error attribution (physical radians)...")
