@@ -172,17 +172,16 @@ class EncoderMono(nn.Module):
     1D CNN Encoder with widened bottleneck (latent shape = (14, 18), dimension = 252) without BatchNorm (bias=True).
     Dimensions: 2048 -> 1043 -> 530 -> 270 -> 138 -> 35 -> 18.
     Channels: 1 -> 32 -> 32 -> 64 -> 128 -> 32 -> 14.
-    Parameters: 130,35
-    fov of bottleneck: individual neuron: 1000 samples, whole bottleneck ~4000 samples.
+    Parameters: 130,350
     """
     def __init__(self):
         super().__init__()
         self.c1 = nn.Conv1d(in_channels=1, out_channels=32, kernel_size=40, stride=2, padding=38, padding_mode="replicate") # out length = 1043
         self.c2 = nn.Conv1d(in_channels=32, out_channels=32, kernel_size=20, stride=2, padding=18, padding_mode="replicate") # out length = 530
         self.c3 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=12, stride=2, padding=10, padding_mode="replicate") # out length = 270
-        self.c4 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=8, stride=2, padding=10, dilation= 2,padding_mode="replicate") # out length = 138
-        self.c5 = nn.Conv1d(in_channels=128, out_channels=32, kernel_size=4, stride=4, padding=3, dilation = 2,padding_mode="replicate") # out length = 35
-        self.c6 = nn.Conv1d(in_channels=32, out_channels=14, kernel_size=4, stride=2, padding=6, dilation = 4,padding_mode="replicate") # out length = 18
+        self.c4 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=8, stride=2, padding=6, padding_mode="replicate") # out length = 138
+        self.c5 = nn.Conv1d(in_channels=128, out_channels=32, kernel_size=4, stride=4, padding=2, padding_mode="replicate") # out length = 35
+        self.c6 = nn.Conv1d(in_channels=32, out_channels=14, kernel_size=4, stride=2, padding=2, padding_mode="replicate") # out length = 18
         self.act = nn.GELU()
 
     def forward(self, x):
@@ -370,9 +369,9 @@ class FlexE(nn.Module):
         self.c1 = nn.Conv1d(channels, c_32, kernel_size=40, stride=2, padding=38, padding_mode="replicate")
         self.c2 = nn.Conv1d(c_32, c_32, kernel_size=20, stride=2, padding=18, padding_mode="replicate")
         self.c3 = nn.Conv1d(c_32, c_64, kernel_size=12, stride=2, padding=10, padding_mode="replicate")
-        self.c4 = nn.Conv1d(c_64, c_128, kernel_size=8, stride=2, padding=10, dilation=2, padding_mode="replicate")
-        self.c5 = nn.Conv1d(c_128, c_32, kernel_size=4, stride=4, padding=3, dilation=2, padding_mode="replicate")
-        self.c6 = nn.Conv1d(c_32, self.bottleneck, kernel_size=4, stride=2, padding=6, dilation=4, padding_mode="replicate")
+        self.c4 = nn.Conv1d(c_64, c_128, kernel_size=8, stride=2, padding=6, padding_mode="replicate")
+        self.c5 = nn.Conv1d(c_128, c_32, kernel_size=4, stride=4, padding=2, padding_mode="replicate")
+        self.c6 = nn.Conv1d(c_32, self.bottleneck, kernel_size=4, stride=2, padding=2, padding_mode="replicate")
         self.act = nn.GELU()
 
     def forward(self, x):
@@ -483,7 +482,7 @@ class CoorbitalAE(nn.Module):
         rec_q = F.normalize(self.D_q(z_q))
         rec_chi1 = self.D_chi1(z_chi1)
         rec_chi2 = self.D_chi2(z_chi2)
-        rec_cooA = F.relu(self.D_cooA(z_cooA))
+        rec_cooA = self.D_cooA(z_cooA)
         rec_cooP = self.D_cooP(z_cooP)
 
         recs = (rec_ophase, rec_q, rec_chi1, rec_chi2, rec_cooA, rec_cooP)
