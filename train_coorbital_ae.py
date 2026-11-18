@@ -63,10 +63,12 @@ PRECONDITION_FREQ = 15           # SOAP precondition frequency
 BETA              = 0.3          # SmoothL1Loss beta
 CLIP_NORM         = 1.0          # Gradient clipping norm threshold
 LR                = 1e-3         # Initial learning rate for SOAP
-MIN_LR            = 1e-6         # Minimum learning rate floor
+MIN_LR            = 5e-9 if args.f64 else 5e-7  # Minimum learning rate floor
+SOAP_EPS          = 1e-16 if args.f64 else 1e-8 # SOAP numerical stability epsilon
 WARMUP_STEPS      = 200          # Linear warmup steps
 EARLY_STOP        = 0            # Early stopping patience (0 to disable)
 LAMBDA_LATENT     = 0.0          # L2 latent regularization weight
+np_dtype          = np.float64 if args.f64 else np.float32
 
 # Configure Precision (FP64 vs. TF32 vs. standard FP32)
 model_dtype = torch.float64 if args.f64 else torch.float32
@@ -124,8 +126,8 @@ with h5py.File(filepath, "r") as f:
     q_arr       = np.empty((n_samples, 4, sample_len), dtype=np.float32)
     chi1_arr    = np.empty((n_samples, 3, sample_len), dtype=np.float32)
     chi2_arr    = np.empty((n_samples, 3, sample_len), dtype=np.float32)
-    cooA_arr    = np.empty((n_samples, 1, sample_len), dtype=np.float32)
-    cooP_arr    = np.empty((n_samples, 1, sample_len), dtype=np.float32)
+    cooA_arr    = np.empty((n_samples, 1, sample_len), dtype=np_dtype)
+    cooP_arr    = np.empty((n_samples, 1, sample_len), dtype=np_dtype)
 
     chunk_size = 10000
     for start in range(0, n_samples, chunk_size):
@@ -146,8 +148,8 @@ with h5py.File(filepath, "r") as f:
 
         # 5 & 6. Co-orbital Waveform (2,2): Amplitude and Unwrapped Phase in physical radians (no phase/100)
         wfs_coorb = f["Waveforms_coorb"][start:end]
-        cooA_arr[start:end, 0, :] = np.abs(wfs_coorb).astype(np.float32)
-        cooP_arr[start:end, 0, :] = wave_to_phase(wfs_coorb).astype(np.float32)
+        cooA_arr[start:end, 0, :] = np.abs(wfs_coorb).astype(np_dtype)
+        cooP_arr[start:end, 0, :] = wave_to_phase(wfs_coorb).astype(np_dtype)
 
         if (end % 20000 == 0) or (end == n_samples):
             print(f"  Loaded {end}/{n_samples} samples ({end / n_samples * 100:.1f}%)")
@@ -167,7 +169,7 @@ print(f"Dataset split: Train={len(train_indices)} | Val={len(val_indices)} | Tes
 
 def compute_norm_stats(arr_2d: np.ndarray, train_idx: np.ndarray, floor_frac: float = 0.01):
     """Compute per-timestep mean and std floored at floor_frac * median(std) to avoid float32 noise blow-up."""
-    sub = arr_2d[train_idx]
+    sub = arr_2d[train_idx].astype(np.float64)
     mu = sub.mean(axis=0)
     raw_std = sub.std(axis=0)
     std_floor = max(floor_frac * float(np.median(raw_std)), 1e-6)
@@ -284,7 +286,7 @@ optimizers = {
         weight_decay=0.0,
         precondition_frequency=PRECONDITION_FREQ,
         merge_dims=False,
-        eps=1e-8,
+        eps=SOAP_EPS,
     )
     for comp in ALL_COMPONENTS
 }

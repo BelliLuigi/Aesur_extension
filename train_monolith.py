@@ -43,8 +43,11 @@ PRECONDITION_FREQ = 15
 BETA = 0.3
 CLIP_NORM = 1.0
 LR = 1e-3
+MIN_LR = 1e-8 if args.f64 else 1e-6
+SOAP_EPS = 1e-12 if args.f64 else 1e-8
 WARMUP_STEPS = 200
 EARLY_STOP = 0
+np_dtype = np.float64 if args.f64 else np.float32
 
 # Configure Precision (FP64 vs. TF32 vs. standard FP32)
 model_dtype = torch.float64 if args.f64 else torch.float32
@@ -99,14 +102,14 @@ with h5py.File(filepath, "r") as f:
     params_ds = f["Parameters"]
     total_avail, sample_len = waveforms_ds.shape
     n_samples = total_avail
-    amplitude = np.empty((n_samples, sample_len), dtype=np.float32)
-    phase = np.empty((n_samples, sample_len), dtype=np.float32)
+    amplitude = np.empty((n_samples, sample_len), dtype=np_dtype)
+    phase = np.empty((n_samples, sample_len), dtype=np_dtype)
     params = params_ds[:n_samples]
     chunk_size = 10000
     for start in range(0, n_samples, chunk_size):
         end = min(start + chunk_size, n_samples)
-        amplitude[start:end] = np.abs(waveforms_ds[start:end]).astype(np.float32)
-        phase[start:end] = get_phase(waveforms_ds[start:end]).astype(np.float32)
+        amplitude[start:end] = np.abs(waveforms_ds[start:end]).astype(np_dtype)
+        phase[start:end] = get_phase(waveforms_ds[start:end]).astype(np_dtype)
 
 print(f"Loaded {n_samples} waveforms (length: {sample_len}).")
 
@@ -252,11 +255,11 @@ def train_one_epoch_mono(
 # ---------------------------------------------------------------------------
 opt_fn_amplitude = opt_add.SOAP(
     model_amplitude.parameters(), lr=LR, betas=(0.95, 0.95), shampoo_beta=0.99,
-    weight_decay=0.0, precondition_frequency=PRECONDITION_FREQ, merge_dims=False, eps=1e-8
+    weight_decay=0.0, precondition_frequency=PRECONDITION_FREQ, merge_dims=False, eps=SOAP_EPS
 )
 opt_fn_phase = opt_add.SOAP(
     model_phase.parameters(), lr=LR, betas=(0.95, 0.95), shampoo_beta=0.99,
-    weight_decay=0.0, precondition_frequency=PRECONDITION_FREQ, merge_dims=False, eps=1e-8
+    weight_decay=0.0, precondition_frequency=PRECONDITION_FREQ, merge_dims=False, eps=SOAP_EPS
 )
 
 # Step-based Warmup + Cosine Decay Schedules
@@ -269,7 +272,7 @@ def make_warmup_cosine_scheduler(optimizer):
         optimizer, start_factor=1e-3, end_factor=1.0, total_iters=warmup_steps
     )
     decay_sched = lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=decay_steps, eta_min=1e-6
+        optimizer, T_max=decay_steps, eta_min=MIN_LR
     )
     return lr_scheduler.SequentialLR(
         optimizer, schedulers=[warmup_sched, decay_sched], milestones=[warmup_steps]
@@ -277,7 +280,7 @@ def make_warmup_cosine_scheduler(optimizer):
 
 scheduler_amplitude = make_warmup_cosine_scheduler(opt_fn_amplitude)
 scheduler_phase = make_warmup_cosine_scheduler(opt_fn_phase)
-print(f"Schedule: {warmup_steps} warmup steps ({1e-6:.1e} -> {LR:.1e}) + {decay_steps} cosine steps -> 1e-6 (Total: {total_steps} steps across {args.epochs} epochs)")
+print(f"Schedule: {warmup_steps} warmup steps ({1e-6:.1e} -> {LR:.1e}) + {decay_steps} cosine steps -> {MIN_LR:.1e} (Total: {total_steps} steps across {args.epochs} epochs)")
 
 # ---------------------------------------------------------------------------
 # Training Loop
@@ -301,12 +304,11 @@ stopped_amplitude = False
 stopped_phase = False
 
 if EARLY_STOP > 0:
-    min_lr_target = 1e-6
     early_stop_amplitude = EarlyStopping(
-        patience=EARLY_STOP, threshold=0.001, mode="rel", min_lr=min_lr_target, patience_at_min_lr=50
+        patience=EARLY_STOP, threshold=0.001, mode="rel", min_lr=MIN_LR, patience_at_min_lr=50
     )
     early_stop_phase = EarlyStopping(
-        patience=EARLY_STOP, threshold=0.001, mode="rel", min_lr=min_lr_target, patience_at_min_lr=50
+        patience=EARLY_STOP, threshold=0.001, mode="rel", min_lr=MIN_LR, patience_at_min_lr=50
     )
     print(f"Early stopping enabled: patience={EARLY_STOP} (gated to final 15%: epoch >= {int(0.85 * args.epochs)})")
 else:

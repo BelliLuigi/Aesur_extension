@@ -32,7 +32,7 @@ def wave_to_phase(w: np.ndarray) -> np.ndarray:
     return ph - ph[:, :1]
 
 
-def phase_to_logfreq(ph: np.ndarray, omega_floor: float = 1e-6) -> np.ndarray:
+def phase_to_logfreq(ph: np.ndarray, omega_floor: float = 1e-6, dtype=np.float32) -> np.ndarray:
     """
     Computes instantaneous log-frequency from phase trajectory:
       omega[k] = phi[k+1] - phi[k] for k in 0..L-2, with last value repeated
@@ -41,7 +41,7 @@ def phase_to_logfreq(ph: np.ndarray, omega_floor: float = 1e-6) -> np.ndarray:
     om = np.diff(ph, axis=-1)
     om = np.concatenate([om, om[:, -1:]], axis=-1)
     om = np.maximum(om, omega_floor)
-    return np.log(om).astype(np.float32)
+    return np.log(om).astype(dtype)
 
 
 def to_phase_numpy(x_norm: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
@@ -78,8 +78,11 @@ BETA = 0.3
 CLIP_NORM = 1.0
 CLAMP_TARGET = 4.0
 LR = 1e-3
+MIN_LR = 1e-8 if args.f64 else 1e-6
+SOAP_EPS = 1e-12 if args.f64 else 1e-8
 WARMUP_STEPS = 200
 EARLY_STOP = 0
+np_dtype = np.float64 if args.f64 else np.float32
 
 # Configure Precision (FP64 vs. TF32 vs. standard FP32)
 model_dtype = torch.float64 if args.f64 else torch.float32
@@ -133,14 +136,14 @@ with h5py.File(filepath, "r") as f:
     waveforms_ds = f["Waveforms"]
     total_avail, sample_len = waveforms_ds.shape
     n_samples = total_avail
-    logfreq = np.empty((n_samples, sample_len), dtype=np.float32)
+    logfreq = np.empty((n_samples, sample_len), dtype=np_dtype)
 
     chunk_size = 10000
     for start in range(0, n_samples, chunk_size):
         end = min(start + chunk_size, n_samples)
         w = waveforms_ds[start:end]
         ph = wave_to_phase(w)
-        logfreq[start:end] = phase_to_logfreq(ph, omega_floor=OMEGA_FLOOR)
+        logfreq[start:end] = phase_to_logfreq(ph, omega_floor=OMEGA_FLOOR, dtype=np_dtype)
 
 print(f"Loaded and converted {n_samples} waveforms to log-frequency (length: {sample_len}).")
 
@@ -314,7 +317,7 @@ opt_fn_logfreq = opt_add.SOAP(
     weight_decay=0.0,
     precondition_frequency=PRECONDITION_FREQ,
     merge_dims=False,
-    eps=1e-8,
+    eps=SOAP_EPS,
 )
 
 # Step-based Warmup + Cosine Decay Schedule
@@ -326,12 +329,12 @@ warmup_sched = lr_scheduler.LinearLR(
     opt_fn_logfreq, start_factor=1e-3, end_factor=1.0, total_iters=warmup_steps
 )
 decay_sched = lr_scheduler.CosineAnnealingLR(
-    opt_fn_logfreq, T_max=decay_steps, eta_min=1e-6
+    opt_fn_logfreq, T_max=decay_steps, eta_min=MIN_LR
 )
 scheduler_logfreq = lr_scheduler.SequentialLR(
     opt_fn_logfreq, schedulers=[warmup_sched, decay_sched], milestones=[warmup_steps]
 )
-print(f"Schedule: {warmup_steps} warmup steps ({1e-6:.1e} -> {LR:.1e}) + {decay_steps} cosine steps -> 1e-6 (Total: {total_steps} steps across {args.epochs} epochs)")
+print(f"Schedule: {warmup_steps} warmup steps ({1e-6:.1e} -> {LR:.1e}) + {decay_steps} cosine steps -> {MIN_LR:.1e} (Total: {total_steps} steps across {args.epochs} epochs)")
 
 # Normalization tensors on device for fast validation phase evaluation
 mu_tensor = torch.from_numpy(mu).to(device=device, dtype=torch.float64)
@@ -340,9 +343,8 @@ sd_tensor = torch.from_numpy(sd).to(device=device, dtype=torch.float64)
 # Early Stopping (Decoupled, gated to final 15% of training)
 stopped_logfreq = False
 if EARLY_STOP > 0:
-    min_lr_target = 1e-6
     early_stop_logfreq = EarlyStopping(
-        patience=EARLY_STOP, threshold=0.001, mode="rel", min_lr=min_lr_target, patience_at_min_lr=50
+        patience=EARLY_STOP, threshold=0.001, mode="rel", min_lr=MIN_LR, patience_at_min_lr=50
     )
     print(f"Early stopping enabled: patience={EARLY_STOP} (gated to final 15%: epoch >= {int(0.85 * args.epochs)})")
 else:
