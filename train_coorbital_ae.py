@@ -27,16 +27,13 @@ from utils import (
 # ---------------------------------------------------------------------------
 def wave_to_phase(w: np.ndarray) -> np.ndarray:
     """
-    Computes unwrapped zero-aligned phase in physical radians.
-    w: complex array of shape (N, L)
-    returns: phase array of shape (N, L) where phase[:, 0] == 0
+    Computes unwrapped phase in physical radians (preserving initial phase phi_0).
     """
-    ph = -np.unwrap(np.angle(w), axis=-1)
-    return ph - ph[:, :1]
+    return -np.unwrap(np.angle(w), axis=-1)
 
 
 # Component identifiers
-COO_COMPONENTS = ["ophase", "q", "chi1", "chi2", "cooA", "cooP"]
+COO_COMPONENTS = ["ophase", "q", "chi1", "chi2", "cooA", "cooP", "cooSub"]
 ALL_COMPONENTS = COO_COMPONENTS
 
 # ---------------------------------------------------------------------------
@@ -118,9 +115,14 @@ if not os.path.exists(filepath):
 
 print(f"Loading coorbital kinematics, dynamics, and waveforms from '{filepath}' (small={args.small})...")
 with h5py.File(filepath, "r") as f:
+    if f["Waveforms_coorb"].ndim != 3 or f["Waveforms_coorb"].shape[1] != 5:
+        raise ValueError(
+            f"Expected 3D Waveforms_coorb of shape (N, 5, L) with all l=2 co-orbital modes, "
+            f"got {f['Waveforms_coorb'].shape}. Please regenerate '{filepath}' using generate_dataset_parallel.py."
+        )
     total_avail = f["Waveforms_coorb"].shape[0]
     n_samples = total_avail
-    sample_len = f["Waveforms_coorb"].shape[1]
+    sample_len = f["Waveforms_coorb"].shape[2]
 
     ophase_arr  = np.empty((n_samples, 1, sample_len), dtype=np.float32)
     q_arr       = np.empty((n_samples, 4, sample_len), dtype=np.float32)
@@ -128,6 +130,7 @@ with h5py.File(filepath, "r") as f:
     chi2_arr    = np.empty((n_samples, 3, sample_len), dtype=np.float32)
     cooA_arr    = np.empty((n_samples, 1, sample_len), dtype=np_dtype)
     cooP_arr    = np.empty((n_samples, 1, sample_len), dtype=np_dtype)
+    cooSub_arr  = np.empty((n_samples, 6, sample_len), dtype=np_dtype)
 
     chunk_size = 10000
     for start in range(0, n_samples, chunk_size):
@@ -146,10 +149,19 @@ with h5py.File(filepath, "r") as f:
         # 4. Dynamic spins chiB (N, 2048, 3) -> transpose to (N, 3, 2048)
         chi2_arr[start:end] = np.transpose(f["Dynamics/chiB"][start:end].astype(np.float32), (0, 2, 1))
 
-        # 5 & 6. Co-orbital Waveform (2,2): Amplitude and Unwrapped Phase in physical radians (no phase/100)
-        wfs_coorb = f["Waveforms_coorb"][start:end]
-        cooA_arr[start:end, 0, :] = np.abs(wfs_coorb).astype(np_dtype)
-        cooP_arr[start:end, 0, :] = wave_to_phase(wfs_coorb).astype(np_dtype)
+        # 5 & 6. Co-orbital Waveform (2,2) (index 4 in m=[-2,-1,0,1,2]): Amplitude and Unwrapped Phase
+        wfs_coorb_all = f["Waveforms_coorb"][start:end]
+        wfs_22 = wfs_coorb_all[:, 4, :]
+        cooA_arr[start:end, 0, :] = np.abs(wfs_22).astype(np_dtype)
+        cooP_arr[start:end, 0, :] = wave_to_phase(wfs_22).astype(np_dtype)
+
+        # 7. Subdominant Co-orbital Modes: (2,-1) [idx 1], (2,0) [idx 2], (2,+1) [idx 3]
+        cooSub_arr[start:end, 0, :] = wfs_coorb_all[:, 1, :].real.astype(np_dtype)
+        cooSub_arr[start:end, 1, :] = wfs_coorb_all[:, 1, :].imag.astype(np_dtype)
+        cooSub_arr[start:end, 2, :] = wfs_coorb_all[:, 2, :].real.astype(np_dtype)
+        cooSub_arr[start:end, 3, :] = wfs_coorb_all[:, 2, :].imag.astype(np_dtype)
+        cooSub_arr[start:end, 4, :] = wfs_coorb_all[:, 3, :].real.astype(np_dtype)
+        cooSub_arr[start:end, 5, :] = wfs_coorb_all[:, 3, :].imag.astype(np_dtype)
 
         if (end % 20000 == 0) or (end == n_samples):
             print(f"  Loaded {end}/{n_samples} samples ({end / n_samples * 100:.1f}%)")
@@ -188,7 +200,16 @@ cooP_arr[:, 0, :] = (cooP_arr[:, 0, :] - mu_cooP) / std_cooP
 mu_cooA, sd_cooA = compute_norm_stats(cooA_arr[:, 0, :], train_indices)
 cooA_arr[:, 0, :] = (cooA_arr[:, 0, :] - mu_cooA) / sd_cooA
 
-print(f"Per-timestep normalization applied to ophase, cooP, and cooA.")
+# 4. Normalize cooSub (6 channels) per-channel, per-timestep
+mu_cooSub = np.zeros((6, sample_len), dtype=np.float64)
+sd_cooSub = np.zeros((6, sample_len), dtype=np.float64)
+for ch in range(6):
+    mu_c, sd_c = compute_norm_stats(cooSub_arr[:, ch, :], train_indices)
+    mu_cooSub[ch] = mu_c
+    sd_cooSub[ch] = sd_c
+    cooSub_arr[:, ch, :] = (cooSub_arr[:, ch, :] - mu_c) / sd_c
+
+print(f"Per-timestep normalization applied to ophase, cooP, cooA, and cooSub.")
 
 # Save normalization constants
 norm_file = f"{title}_norm_params.npz"
@@ -200,6 +221,8 @@ np.savez(
     std_cooP=std_cooP,
     mu_cooA=mu_cooA,
     sd_cooA=sd_cooA,
+    mu_cooSub=mu_cooSub,
+    sd_cooSub=sd_cooSub,
 )
 print(f"Saved normalization constants to: {norm_file}")
 
@@ -211,8 +234,9 @@ joint_dataset = TensorDataset(
     torch.from_numpy(chi2_arr),
     torch.from_numpy(cooA_arr),
     torch.from_numpy(cooP_arr),
+    torch.from_numpy(cooSub_arr),
 )
-del ophase_arr, q_arr, chi1_arr, chi2_arr, cooA_arr, cooP_arr
+del ophase_arr, q_arr, chi1_arr, chi2_arr, cooA_arr, cooP_arr, cooSub_arr
 
 j_train = Subset(joint_dataset, train_indices)
 j_val   = Subset(joint_dataset, val_indices)
@@ -255,7 +279,9 @@ def _make_time_weight(w_np: np.ndarray) -> torch.Tensor:
     w_mean = float(w.mean())
     if w_mean > 0.0:
         w = w / w_mean
-    return torch.from_numpy(w).view(1, 1, -1).to(device=device, dtype=model_dtype)
+    if w.ndim == 1:
+        return torch.from_numpy(w).view(1, 1, -1).to(device=device, dtype=model_dtype)
+    return torch.from_numpy(w).unsqueeze(0).to(device=device, dtype=model_dtype)
 
 loss_weights = {
     "ophase": _make_time_weight(std_ophase * mu_cooA),
@@ -264,6 +290,7 @@ loss_weights = {
     "chi2": None,
     "cooA": _make_time_weight(sd_cooA),
     "cooP": _make_time_weight(std_cooP * mu_cooA),
+    "cooSub": _make_time_weight(sd_cooSub),
 }
 
 def compute_branch_loss(comp: str, pred: torch.Tensor, target: torch.Tensor, latent: torch.Tensor = None) -> torch.Tensor:
@@ -545,6 +572,9 @@ pred_q    = collected_preds["q"]
 true_cooA = collected_trues["cooA"] * sd_cooA + mu_cooA
 true_q    = collected_trues["q"]
 
+pred_cooSub = collected_preds["cooSub"] * sd_cooSub[np.newaxis, :, :] + mu_cooSub[np.newaxis, :, :]
+true_cooSub = collected_trues["cooSub"] * sd_cooSub[np.newaxis, :, :] + mu_cooSub[np.newaxis, :, :]
+
 # 1. Full NN reconstruction
 mismatches_full = compute_inertial_mismatches(
     pred_cooA=pred_cooA,
@@ -552,6 +582,7 @@ mismatches_full = compute_inertial_mismatches(
     pred_ophase=pred_ophase_rad,
     pred_q=pred_q,
     true_inertial=true_inertial,
+    pred_cooSub=pred_cooSub,
     norm_phase=1.0,
 )
 
@@ -562,6 +593,7 @@ mismatches_swap_ophase = compute_inertial_mismatches(
     pred_ophase=pred_ophase_rad,
     pred_q=pred_q,
     true_inertial=true_inertial,
+    pred_cooSub=pred_cooSub,
     true_ophase=true_ophase_rad,
     swap_component="ophase",
     norm_phase=1.0,
@@ -574,6 +606,7 @@ mismatches_swap_q = compute_inertial_mismatches(
     pred_ophase=pred_ophase_rad,
     pred_q=pred_q,
     true_inertial=true_inertial,
+    pred_cooSub=pred_cooSub,
     true_q=true_q,
     swap_component="q",
     norm_phase=1.0,
@@ -586,6 +619,7 @@ mismatches_swap_cooA = compute_inertial_mismatches(
     pred_ophase=pred_ophase_rad,
     pred_q=pred_q,
     true_inertial=true_inertial,
+    pred_cooSub=pred_cooSub,
     true_cooA=true_cooA,
     swap_component="cooA",
     norm_phase=1.0,
@@ -598,20 +632,36 @@ mismatches_swap_cooP = compute_inertial_mismatches(
     pred_ophase=pred_ophase_rad,
     pred_q=pred_q,
     true_inertial=true_inertial,
+    pred_cooSub=pred_cooSub,
     true_cooP=true_cooP_rad,
     swap_component="cooP",
     norm_phase=1.0,
 )
 
-# 7. Swap coo (A & P) -> truth
+# 7. Swap cooSub -> truth
+mismatches_swap_cooSub = compute_inertial_mismatches(
+    pred_cooA=pred_cooA,
+    pred_cooP=pred_cooP_rad,
+    pred_ophase=pred_ophase_rad,
+    pred_q=pred_q,
+    true_inertial=true_inertial,
+    pred_cooSub=pred_cooSub,
+    true_cooSub=true_cooSub,
+    swap_component="cooSub",
+    norm_phase=1.0,
+)
+
+# 8. Swap coo (A, P, Sub) -> truth
 mismatches_swap_coo = compute_inertial_mismatches(
     pred_cooA=pred_cooA,
     pred_cooP=pred_cooP_rad,
     pred_ophase=pred_ophase_rad,
     pred_q=pred_q,
     true_inertial=true_inertial,
+    pred_cooSub=pred_cooSub,
     true_cooA=true_cooA,
     true_cooP=true_cooP_rad,
+    true_cooSub=true_cooSub,
     swap_component="coo",
     norm_phase=1.0,
 )
@@ -622,7 +672,8 @@ mismatches_dict = {
     "q -> truth": mismatches_swap_q,
     "cooA -> truth": mismatches_swap_cooA,
     "cooP -> truth": mismatches_swap_cooP,
-    "coo(A+P) -> truth": mismatches_swap_coo,
+    "cooSub -> truth": mismatches_swap_cooSub,
+    "coo(A+P+Sub) -> truth": mismatches_swap_coo,
 }
 
 # Save comparative distribution plot

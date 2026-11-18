@@ -439,19 +439,20 @@ class FlexD(nn.Module):
 class CoorbitalAE(nn.Module):
     """
     Modular 1D CNN Autoencoder decomposing precessing waveforms into co-orbital kinematics and dynamics.
-    Total parameters: ~655k across 12 submodules (6 encoders + 6 decoders with Mono architecture):
+    Total parameters: ~760k across 14 submodules (7 encoders + 7 decoders with Mono architecture):
         - ophase (btnk=1, width=0.25, ch=1): E (8,361)   + D (16,957)  = 25,318   (18 dims)
         - q      (btnk=2, width=0.50, ch=4): E (34,578)  + D (67,580)  = 102,158  (36 dims)
         - chi1   (btnk=2, width=0.50, ch=3): E (33,938)  + D (67,563)  = 101,501  (36 dims)
         - chi2   (btnk=2, width=0.50, ch=3): E (33,938)  + D (67,563)  = 101,501  (36 dims)
         - cooA   (btnk=2, width=0.50, ch=1): E (32,658)  + D (67,529)  = 100,187  (36 dims)
         - cooP   (btnk=4, width=0.75, ch=1): E (72,988)  + D (151,837) = 224,825  (72 dims)
-    Total latent dimensions across all 6 branches: 234 dims
+        - cooSub (btnk=2, width=0.50, ch=6): Re/Im of co-orbital (2,-1), (2,0), (2,+1) (36 dims)
+    Total latent dimensions across all 7 branches: 270 dims
     """
     def __init__(self, bottlenecks: dict = None, widths: dict = None):
         super().__init__()
-        b_cfg = {"ophase": 1, "q": 2, "chi1": 2, "chi2": 2, "cooA": 2, "cooP": 4}
-        w_cfg = {"ophase": 0.25, "q": 0.5, "chi1": 0.5, "chi2": 0.5, "cooA": 0.5, "cooP": 0.75}
+        b_cfg = {"ophase": 1, "q": 2, "chi1": 2, "chi2": 2, "cooA": 2, "cooP": 4, "cooSub": 2}
+        w_cfg = {"ophase": 0.25, "q": 0.5, "chi1": 0.5, "chi2": 0.5, "cooA": 0.5, "cooP": 0.75, "cooSub": 0.5}
         if bottlenecks:
             b_cfg.update(bottlenecks)
         if widths:
@@ -469,8 +470,10 @@ class CoorbitalAE(nn.Module):
         self.D_cooA = FlexD(bottleneck=b_cfg["cooA"], width=w_cfg["cooA"], channels=1)
         self.E_cooP = FlexE(bottleneck=b_cfg["cooP"], width=w_cfg["cooP"], channels=1)
         self.D_cooP = FlexD(bottleneck=b_cfg["cooP"], width=w_cfg["cooP"], channels=1)
+        self.E_cooSub = FlexE(bottleneck=b_cfg["cooSub"], width=w_cfg["cooSub"], channels=6)
+        self.D_cooSub = FlexD(bottleneck=b_cfg["cooSub"], width=w_cfg["cooSub"], channels=6)
     
-    def forward(self, ophase, q, chi1, chi2, cooA, cooP, return_latent: bool = False):
+    def forward(self, ophase, q, chi1, chi2, cooA, cooP, cooSub=None, return_latent: bool = False):
         z_ophase = self.E_ophase(ophase)
         z_q = self.E_q(q)
         z_chi1 = self.E_chi1(chi1)
@@ -484,6 +487,15 @@ class CoorbitalAE(nn.Module):
         rec_chi2 = self.D_chi2(z_chi2)
         rec_cooA = self.D_cooA(z_cooA)
         rec_cooP = self.D_cooP(z_cooP)
+
+        if cooSub is not None:
+            z_cooSub = self.E_cooSub(cooSub)
+            rec_cooSub = self.D_cooSub(z_cooSub)
+            recs = (rec_ophase, rec_q, rec_chi1, rec_chi2, rec_cooA, rec_cooP, rec_cooSub)
+            if return_latent:
+                latents = (z_ophase, z_q, z_chi1, z_chi2, z_cooA, z_cooP, z_cooSub)
+                return recs, latents
+            return recs
 
         recs = (rec_ophase, rec_q, rec_chi1, rec_chi2, rec_cooA, rec_cooP)
         if return_latent:

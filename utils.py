@@ -117,7 +117,7 @@ def compute_mismatches(
     return np.array(mismatches, dtype=np.float64)
 
 
-def reconstruct_inertial_waveform(cooA, cooP, ophase, q, norm_phase: float = 100.0):
+def reconstruct_inertial_waveform(cooA, cooP, ophase, q, cooSub=None, norm_phase: float = 100.0):
     """
     Reconstructs the inertial-frame (2, 2) waveform from co-orbital components
     following Section III G of Pürrer et al. (2026):
@@ -126,6 +126,7 @@ def reconstruct_inertial_waveform(cooA, cooP, ophase, q, norm_phase: float = 100
       3. Composes full rotation quaternion: R = q_copr (x) R_z
       4. Projects R onto unit sphere
       5. Forms co-orbital modes array (m in [-2, ..., 2]) with h_{2,-2} = (h_{2,2})*
+         and optional subdominant modes h_{2,-1}, h_{2,0}, h_{2,+1} from cooSub (6, L)
       6. Applies Wigner-D rotation to inertial frame: h_inert_22 = (rotateWaveform(R, h_modes))[4]
 
     Supports both single waveform (1D / 2D) and batched tensors/arrays.
@@ -146,6 +147,8 @@ def reconstruct_inertial_waveform(cooA, cooP, ophase, q, norm_phase: float = 100
         ophase = ophase.detach().cpu().numpy()
     if isinstance(q, torch.Tensor):
         q = q.detach().cpu().numpy()
+    if cooSub is not None and isinstance(cooSub, torch.Tensor):
+        cooSub = cooSub.detach().cpu().numpy()
 
     # Squeeze channel dim if present
     if cooA.ndim == 3 and cooA.shape[1] == 1:
@@ -161,6 +164,8 @@ def reconstruct_inertial_waveform(cooA, cooP, ophase, q, norm_phase: float = 100
         cooP = cooP[np.newaxis, :]
         ophase = ophase[np.newaxis, :]
         q = q[np.newaxis, ...]
+        if cooSub is not None and cooSub.ndim == 2:
+            cooSub = cooSub[np.newaxis, ...]
 
     B, L = cooA.shape
     h_inert_22 = np.empty((B, L), dtype=np.complex128)
@@ -190,6 +195,11 @@ def reconstruct_inertial_waveform(cooA, cooP, ophase, q, norm_phase: float = 100
         h_modes = np.zeros((5, L), dtype=np.complex128)
         h_modes[0] = np.conj(h_22_coorb)  # (2, -2)
         h_modes[4] = h_22_coorb           # (2, 2)
+        if cooSub is not None:
+            sub_b = cooSub[b].astype(np.float64)
+            h_modes[1] = sub_b[0] + 1j * sub_b[1]  # (2, -1)
+            h_modes[2] = sub_b[2] + 1j * sub_b[3]  # (2, 0)
+            h_modes[3] = sub_b[4] + 1j * sub_b[5]  # (2, 1)
 
         # 6. Rotate to inertial frame
         h_inert_22[b] = rotateWaveform(q_full, h_modes)[4]
@@ -203,10 +213,12 @@ def compute_inertial_mismatches(
     pred_ophase,
     pred_q,
     true_inertial,
+    pred_cooSub=None,
     true_cooA=None,
     true_cooP=None,
     true_ophase=None,
     true_q=None,
+    true_cooSub=None,
     swap_component: str = None,
     norm_phase: float = 100.0,
 ):
@@ -217,17 +229,19 @@ def compute_inertial_mismatches(
         - None: all predicted components
         - 'ophase': swap predicted ophase with true_ophase
         - 'q': swap predicted q with true_q
-        - 'coo': swap predicted (cooA, cooP) with true_(cooA, cooP)
+        - 'coo': swap predicted (cooA, cooP, cooSub) with true_(cooA, cooP, cooSub)
         - 'cooA': swap predicted cooA with true_cooA
         - 'cooP': swap predicted cooP with true_cooP
+        - 'cooSub': swap predicted cooSub with true_cooSub
     """
     eff_cooA = true_cooA if (swap_component in ('coo', 'cooA') and true_cooA is not None) else pred_cooA
     eff_cooP = true_cooP if (swap_component in ('coo', 'cooP') and true_cooP is not None) else pred_cooP
     eff_ophase = true_ophase if (swap_component == 'ophase' and true_ophase is not None) else pred_ophase
     eff_q = true_q if (swap_component == 'q' and true_q is not None) else pred_q
+    eff_cooSub = true_cooSub if (swap_component in ('coo', 'cooSub') and true_cooSub is not None) else pred_cooSub
 
     rec_inertial = reconstruct_inertial_waveform(
-        eff_cooA, eff_cooP, eff_ophase, eff_q, norm_phase=norm_phase
+        eff_cooA, eff_cooP, eff_ophase, eff_q, cooSub=eff_cooSub, norm_phase=norm_phase
     )
 
     if not isinstance(rec_inertial, torch.Tensor):
@@ -563,13 +577,15 @@ def plot_training_curves(epochs, train_losses, val_losses, lrs, run_title, metri
 
 def plot_coorbital_training_curves(history, component_names, run_title, output_path):
     """
-    Plots a unified 2x3 grid of training curves for the 6 CoorbitalAE submodules:
+    Plots a unified grid of training curves for the CoorbitalAE submodules:
     Each subplot shows Train Loss (Blue), Validation Loss (Red), Learning Rate (Black dashed, twinx),
     and marks the minimum validation loss with an annotated pointer.
     """
     epochs = history["epoch"]
-    nrows, ncols = 2, 3
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(16, 9), dpi=300)
+    n_comp = len(component_names)
+    nrows = 2
+    ncols = (n_comp + 1) // 2
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5.3 * ncols, 9), dpi=300)
     fig.patch.set_facecolor("#ffffff")
 
     axes_flat = axes.flatten()
@@ -619,7 +635,10 @@ def plot_coorbital_training_curves(history, component_names, run_title, output_p
         labels = [l.get_label() for l in lines]
         ax.legend(lines, labels, frameon=True, facecolor="#ffffff", edgecolor="#cccccc", fontsize=8, loc="upper right")
 
-    fig.suptitle(f"{run_title} - CoorbitalAE Training Curves (6 Submodules)", fontsize=14, fontweight="bold", y=0.99)
+    for empty_idx in range(n_comp, len(axes_flat)):
+        axes_flat[empty_idx].axis("off")
+
+    fig.suptitle(f"{run_title} - CoorbitalAE Training Curves ({n_comp} Submodules)", fontsize=14, fontweight="bold", y=0.99)
     fig.tight_layout()
     fig.savefig(output_path, dpi=300)
     plt.close(fig)

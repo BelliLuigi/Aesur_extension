@@ -75,8 +75,8 @@ BATCH_SIZE = 128
 OMEGA_FLOOR = 1e-6
 PRECONDITION_FREQ = 15
 BETA = 0.3
+LAMBDA_PHASE = 0.1
 CLIP_NORM = 1.0
-CLAMP_TARGET = 4.0
 LR = 1e-3
 MIN_LR = 1e-8 if args.f64 else 1e-6
 SOAP_EPS = 1e-12 if args.f64 else 1e-8
@@ -177,16 +177,20 @@ sd = np.sqrt(np.maximum(sq / len(train_indices) - mu ** 2, 0.0)) + 1e-6
 for s in range(0, n_samples, 5000):
     logfreq[s:s + 5000] = (logfreq[s:s + 5000] - mu) / sd
 
-# Fix 1: Clamp normalized log-frequency to prevent -37 sigma spikes from omega_floor
-if CLAMP_TARGET > 0:
-    n_clamped = int((np.abs(logfreq) > CLAMP_TARGET).sum())
-    logfreq = np.clip(logfreq, -CLAMP_TARGET, CLAMP_TARGET)
-    print(f"Fix 1 applied: clamped {n_clamped} outlier values to [-{CLAMP_TARGET}, {CLAMP_TARGET}] ({100 * n_clamped / logfreq.size:.3f}%).")
-
 # Save normalization constants
 norm_npz_path = f"{title}_logfreq_norm.npz"
 np.savez(norm_npz_path, mu=mu, sd=sd, omega_floor=OMEGA_FLOOR)
 print(f"Saved logfreq normalization constants: {norm_npz_path}")
+
+# Compute train-set mean amplitude profile for weighting cumulative phase loss
+mu_ampl = np.zeros(sample_len, dtype=np.float64)
+with h5py.File(filepath, "r") as f:
+    wf_ds = f["Waveforms"]
+    for s in range(0, len(train_indices), 5000):
+        idx_blk = np.sort(train_indices[s:s + 5000])
+        mu_ampl += np.abs(wf_ds[idx_blk]).sum(axis=0)
+mu_ampl /= len(train_indices)
+amp_weight_np = mu_ampl[:-1] / np.maximum(mu_ampl[:-1].mean(), 1e-12)
 
 # Build PyTorch Tensors and DataLoaders
 logf_tensor = torch.from_numpy(logfreq)
@@ -221,13 +225,26 @@ else:
     model_logfreq = raw_model_logfreq
 
 loss_fn_logfreq = nn.SmoothL1Loss(beta=BETA)
+loss_fn_phase = nn.SmoothL1Loss(beta=BETA, reduction="none")
 lambda_latent = 0.0
 
 # ---------------------------------------------------------------------------
 # Training & Validation Functions
 # ---------------------------------------------------------------------------
 def train_one_epoch_logfreq(
-    model, optimizer, scheduler, loss_fn, device, loader, clip_norm: float = CLIP_NORM, lambda_latent: float = 0.0
+    model,
+    optimizer,
+    scheduler,
+    loss_fn,
+    phase_loss_fn,
+    device,
+    loader,
+    mu_t,
+    sd_t,
+    amp_weight_t,
+    lambda_phase: float = LAMBDA_PHASE,
+    clip_norm: float = CLIP_NORM,
+    lambda_latent: float = 0.0,
 ):
     model.train(True)
     dtype = next(model.parameters()).dtype
@@ -245,7 +262,19 @@ def train_one_epoch_logfreq(
             loss = recon_loss + lambda_latent * torch.mean(z ** 2)
         else:
             outputs = model(inputs)
-            loss = loss_fn(outputs, inputs)
+            recon_loss = loss_fn(outputs, inputs)
+            loss = recon_loss
+
+        if lambda_phase > 0.0:
+            out_2d = outputs.squeeze(1).double()
+            inp_2d = inputs.squeeze(1).double()
+            om_pred = torch.exp(torch.clamp(out_2d * sd_t + mu_t, min=-20.0, max=5.0))
+            om_true = torch.exp(inp_2d * sd_t + mu_t)
+            ph_pred_cum = torch.cumsum(om_pred[:, :-1], dim=-1)
+            ph_true_cum = torch.cumsum(om_true[:, :-1], dim=-1)
+            phase_elem = phase_loss_fn(ph_pred_cum, ph_true_cum)
+            phase_loss = (phase_elem * amp_weight_t).mean().to(dtype)
+            loss = loss + lambda_phase * phase_loss
 
         loss.backward()
 
@@ -336,9 +365,10 @@ scheduler_logfreq = lr_scheduler.SequentialLR(
 )
 print(f"Schedule: {warmup_steps} warmup steps ({1e-6:.1e} -> {LR:.1e}) + {decay_steps} cosine steps -> {MIN_LR:.1e} (Total: {total_steps} steps across {args.epochs} epochs)")
 
-# Normalization tensors on device for fast validation phase evaluation
+# Normalization tensors on device for fast training/validation phase evaluation
 mu_tensor = torch.from_numpy(mu).to(device=device, dtype=torch.float64)
 sd_tensor = torch.from_numpy(sd).to(device=device, dtype=torch.float64)
+amp_weight_tensor = torch.from_numpy(amp_weight_np).to(device=device, dtype=torch.float64).unsqueeze(0)
 
 # Early Stopping (Decoupled, gated to final 15% of training)
 stopped_logfreq = False
@@ -365,13 +395,24 @@ history = {
     "epoch_time_sec": [],
 }
 
-print(f"Starting training for {args.epochs} epochs (LR={LR:.1e}, clip_norm={CLIP_NORM}, clamp={CLAMP_TARGET}, beta={BETA}, batch_size={BATCH_SIZE}, precond_freq={PRECONDITION_FREQ})...")
+print(f"Starting training for {args.epochs} epochs (LR={LR:.1e}, clip_norm={CLIP_NORM}, beta={BETA}, lambda_phase={LAMBDA_PHASE}, batch_size={BATCH_SIZE}, precond_freq={PRECONDITION_FREQ})...")
 
 for epoch in range(args.epochs):
     t0 = time.time()
     avg_loss_lf = train_one_epoch_logfreq(
-        model_logfreq, opt_fn_logfreq, scheduler_logfreq, loss_fn_logfreq, device, l_train_loader,
-        clip_norm=CLIP_NORM, lambda_latent=lambda_latent
+        model_logfreq,
+        opt_fn_logfreq,
+        scheduler_logfreq,
+        loss_fn_logfreq,
+        loss_fn_phase,
+        device,
+        l_train_loader,
+        mu_t=mu_tensor,
+        sd_t=sd_tensor,
+        amp_weight_t=amp_weight_tensor,
+        lambda_phase=LAMBDA_PHASE,
+        clip_norm=CLIP_NORM,
+        lambda_latent=lambda_latent,
     )
     avg_vloss_lf, avg_phase_err = validate_logfreq(
         model_logfreq, l_val_loader, loss_fn_logfreq, device=device, mu_t=mu_tensor, sd_t=sd_tensor, lambda_latent=lambda_latent
@@ -387,10 +428,13 @@ for epoch in range(args.epochs):
     history["lr_logfreq"].append(current_lr_lf)
     history["epoch_time_sec"].append(epoch_duration)
 
-    # Save best Log-Frequency model & checkpoint (by validation loss)
     if avg_vloss_lf < best_vloss_logfreq:
         best_vloss_logfreq = avg_vloss_lf
-        torch.save(raw_model_logfreq.state_dict(), f"{title}_logfreq_best.pt")
+
+    # Save best Phase model & checkpoint (by cumulative unwrapped phase error in radians)
+    if avg_phase_err < best_vphase_err:
+        best_vphase_err = avg_phase_err
+        torch.save(raw_model_logfreq.state_dict(), f"{title}_phase_best.pt")
         torch.save(
             {
                 "epoch": epoch + 1,
@@ -400,13 +444,8 @@ for epoch in range(args.epochs):
                 "best_vloss": best_vloss_logfreq,
                 "best_vphase_err": best_vphase_err,
             },
-            f"{title}_logfreq_checkpoint.pt",
+            f"{title}_phase_checkpoint.pt",
         )
-
-    # Save best Phase model (by cumulative unwrapped phase error in radians)
-    if avg_phase_err < best_vphase_err:
-        best_vphase_err = avg_phase_err
-        torch.save(raw_model_logfreq.state_dict(), f"{title}_phase_best.pt")
 
     if (epoch + 1) % 10 == 0 or epoch == 0 or (epoch + 1) == args.epochs:
         print(
@@ -458,13 +497,7 @@ plot_training_curves(
 )
 
 # Compute test set evaluation loss and phase error
-best_logf_path = f"{title}_logfreq_best.pt"
 best_phase_path = f"{title}_phase_best.pt"
-
-raw_model_logfreq.load_state_dict(torch.load(best_logf_path, map_location=device))
-test_loss, test_phase_err = validate_logfreq(
-    model_logfreq, l_test_loader, loss_fn_logfreq, device=device, mu_t=mu_tensor, sd_t=sd_tensor, lambda_latent=lambda_latent
-)
 
 raw_model_logfreq.load_state_dict(torch.load(best_phase_path, map_location=device))
 test_phase_model_loss, test_phase_model_err = validate_logfreq(
@@ -472,11 +505,9 @@ test_phase_model_loss, test_phase_model_err = validate_logfreq(
 )
 
 print(f"\nTraining completed successfully for run '{title}'.")
-print(f"  - Test Loss (Best Loss Model):        {test_loss:.6f} (Phase Err: {test_phase_err:.4f} rad)")
 print(f"  - Test Phase Err (Best Phase Model):    {test_phase_model_err:.4f} rad (Loss: {test_phase_model_loss:.6f})")
-print(f"  - Best LogFreq Model:                 {best_logf_path}")
 print(f"  - Best Phase Model:                   {best_phase_path}")
-print(f"  - LogFreq Checkpoint:                 {title}_logfreq_checkpoint.pt")
+print(f"  - Phase Checkpoint:                   {title}_phase_checkpoint.pt")
 print(f"  - Normalization NPZ (mu,sd):          {norm_npz_path}")
 print(f"  - Metrics CSV:                        {csv_filename}")
 print(f"  - Metrics NPY:                        {npy_filename}")

@@ -76,7 +76,7 @@ def worker_task(worker_id, q_slice, chiA_slice, chiB_slice, part_path):
 
     with h5py.File(part_path, "w", libver="latest") as f:
         f.create_dataset("Waveforms", shape=(n_part, LENGTH), dtype=np.complex128)
-        f.create_dataset("Waveforms_coorb", shape=(n_part, LENGTH), dtype=np.complex128)
+        f.create_dataset("Waveforms_coorb", shape=(n_part, 5, LENGTH), dtype=np.complex128)
         f.create_dataset("Parameters", shape=(n_part, 7), dtype=np.float32)
         g_dyn = f.create_group("Dynamics")
         d_q_copr = g_dyn.create_dataset("q_copr", shape=(n_part, 4, LENGTH), dtype=np.float32)
@@ -90,7 +90,7 @@ def worker_task(worker_id, q_slice, chiA_slice, chiB_slice, part_path):
             cur_n = end - start
 
             wave_chunk = np.empty((cur_n, LENGTH), dtype=np.complex128)
-            wave_coorb_chunk = np.empty((cur_n, LENGTH), dtype=np.complex128)
+            wave_coorb_chunk = np.empty((cur_n, 5, LENGTH), dtype=np.complex128)
             param_chunk = np.empty((cur_n, 7), dtype=np.float32)
             q_copr_chunk = np.empty((cur_n, 4, LENGTH), dtype=np.float32)
             chiA_chunk = np.empty((cur_n, LENGTH, 3), dtype=np.float32)
@@ -114,7 +114,7 @@ def worker_task(worker_id, q_slice, chiA_slice, chiB_slice, part_path):
 
                 wave_chunk[i] = h[(2, 2)]
 
-                # Co-orbital frame (2, 2) mode: steady slowly-varying envelope (zero carrier oscillations)
+                # Co-orbital frame l=2 modes (m in [-2, -1, 0, 1, 2])
                 h_in_arr = np.array([h[(2, m)] for m in range(-2, 3)])
                 q_rot = np.array([
                     np.cos(dyn["orbphase"] / 2.0),
@@ -123,7 +123,7 @@ def worker_task(worker_id, q_slice, chiA_slice, chiB_slice, part_path):
                     np.sin(dyn["orbphase"] / 2.0),
                 ])
                 qfull = multiplyQuats(dyn["q_copr"], q_rot)
-                wave_coorb_chunk[i] = rotateWaveform(quatInv(qfull), h_in_arr)[4]
+                wave_coorb_chunk[i] = rotateWaveform(quatInv(qfull), h_in_arr)
 
                 param_chunk[i] = [q_val, *chiA0_val, *chiB0_val]
                 q_copr_chunk[i] = dyn["q_copr"]
@@ -177,7 +177,8 @@ def main():
     param_names = ["q", "chiA0_x", "chiA0_y", "chiA0_z", "chiB0_x", "chiB0_y", "chiB0_z"]
     with h5py.File(OUTPUT_PATH, "w", libver="latest") as f_out:
         f_out.create_dataset("Waveforms", shape=(N_TOTAL, LENGTH), dtype=np.complex128)
-        f_out.create_dataset("Waveforms_coorb", shape=(N_TOTAL, LENGTH), dtype=np.complex128)
+        d_wf_coorb = f_out.create_dataset("Waveforms_coorb", shape=(N_TOTAL, 5, LENGTH), dtype=np.complex128)
+        d_wf_coorb.attrs["modes"] = [-2, -1, 0, 1, 2]
         d_params = f_out.create_dataset("Parameters", shape=(N_TOTAL, 7), dtype=np.float32)
         d_params.attrs["names"] = param_names
 

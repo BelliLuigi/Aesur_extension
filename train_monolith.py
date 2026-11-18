@@ -40,7 +40,7 @@ args = parser.parse_args()
 # ---------------------------------------------------------------------------
 BATCH_SIZE = 128
 PRECONDITION_FREQ = 15
-BETA = 0.3
+BETA = 0.02
 CLIP_NORM = 1.0
 LR = 1e-3
 MIN_LR = 1e-8 if args.f64 else 1e-6
@@ -208,9 +208,22 @@ else:
     model_amplitude = raw_model_amplitude
     model_phase = raw_model_phase
 
-# Dedicated per-branch losses
-loss_fn_amplitude = nn.SmoothL1Loss(beta=BETA)
-loss_fn_phase = nn.SmoothL1Loss(beta=BETA)
+# Dedicated per-branch time-weighted SmoothL1 losses (Action 1 + Action 3)
+class TimeWeightedSmoothL1Loss(nn.Module):
+    def __init__(self, time_weight_np: np.ndarray, beta: float, device, dtype):
+        super().__init__()
+        w = np.asarray(time_weight_np, dtype=np.float64)
+        w_mean = float(w.mean())
+        if w_mean > 0.0:
+            w = w / w_mean
+        self.register_buffer("weight", torch.from_numpy(w).view(1, 1, -1).to(device=device, dtype=dtype))
+        self.loss_fn = nn.SmoothL1Loss(beta=beta, reduction="none")
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        return (self.loss_fn(pred, target) * self.weight).mean()
+
+loss_fn_amplitude = TimeWeightedSmoothL1Loss(sd_ampl, beta=BETA, device=device, dtype=model_dtype)
+loss_fn_phase = TimeWeightedSmoothL1Loss(mu_ampl * sd_phase, beta=BETA, device=device, dtype=model_dtype)
 lambda_latent = 0.0
 
 # ---------------------------------------------------------------------------
