@@ -50,6 +50,7 @@ parser.add_argument("--epochs", type=int, default=800, help="Training epochs (de
 parser.add_argument("--small", action=argparse.BooleanOptionalAction, default=False, help="Use small dataset variant (NRSur7dq4v2_dataset_small.hdf) (default: False)")
 parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False, help="Enable/disable torch.compile (default: False)")
 parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=False, help="Enable/disable TF32 precision on CUDA (default: False)")
+parser.add_argument("--f64", action=argparse.BooleanOptionalAction, default=False, help="Enable/disable float64 (double) precision training (default: False)")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -67,8 +68,13 @@ WARMUP_STEPS      = 200          # Linear warmup steps
 EARLY_STOP        = 0            # Early stopping patience (0 to disable)
 LAMBDA_LATENT     = 0.0          # L2 latent regularization weight
 
-# Configure Precision (TF32 vs. standard FP32)
-if args.tf32 and torch.cuda.is_available():
+# Configure Precision (FP64 vs. TF32 vs. standard FP32)
+model_dtype = torch.float64 if args.f64 else torch.float32
+if args.f64:
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    print("Precision: Float64 (double precision).")
+elif args.tf32 and torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.set_float32_matmul_precision("high")
     torch.backends.cudnn.allow_tf32 = True
@@ -217,7 +223,7 @@ test_loader  = DataLoader(j_test, batch_size=VAL_BATCH_SIZE, shuffle=False)
 # ---------------------------------------------------------------------------
 # Model, Loss Functions & Regularization
 # ---------------------------------------------------------------------------
-raw_model = CoorbitalAE().to(device)
+raw_model = CoorbitalAE().to(device=device, dtype=model_dtype)
 init_kaiming_weights(raw_model)
 
 total_params = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
@@ -247,7 +253,7 @@ def _make_time_weight(w_np: np.ndarray) -> torch.Tensor:
     w_mean = float(w.mean())
     if w_mean > 0.0:
         w = w / w_mean
-    return torch.from_numpy(w).view(1, 1, -1).to(device)
+    return torch.from_numpy(w).view(1, 1, -1).to(device=device, dtype=model_dtype)
 
 loss_weights = {
     "ophase": _make_time_weight(std_ophase * mu_cooA),
@@ -345,7 +351,7 @@ for epoch in range(EPOCHS):
     train_loss_sums = {comp: 0.0 for comp in ALL_COMPONENTS}
 
     for batch in train_loader:
-        b_inputs = [x.to(device=device, dtype=torch.float32, non_blocking=True) for x in batch]
+        b_inputs = [x.to(device=device, dtype=model_dtype, non_blocking=True) for x in batch]
         # b_inputs order: ophase, q, chi1, chi2, cooA, cooP
 
         for comp in ALL_COMPONENTS:
@@ -381,7 +387,7 @@ for epoch in range(EPOCHS):
     val_loss_sums = {comp: 0.0 for comp in ALL_COMPONENTS}
     with torch.no_grad():
         for vbatch in val_loader:
-            vb_inputs = [x.to(device=device, dtype=torch.float32, non_blocking=True) for x in vbatch]
+            vb_inputs = [x.to(device=device, dtype=model_dtype, non_blocking=True) for x in vbatch]
             vrecs, vz = model(*vb_inputs, return_latent=True)
             for i, comp in enumerate(ALL_COMPONENTS):
                 vloss_c = compute_branch_loss(comp, vrecs[i], vb_inputs[i], vz[i])
@@ -503,7 +509,7 @@ collected_trues = {comp: [] for comp in ALL_COMPONENTS}
 
 with torch.no_grad():
     for tb_batch in test_loader:
-        tb_inputs = [x.to(device=device, dtype=torch.float32) for x in tb_batch]
+        tb_inputs = [x.to(device=device, dtype=model_dtype) for x in tb_batch]
         tb_recs = model(*tb_inputs, return_latent=False)
 
         for i, comp in enumerate(ALL_COMPONENTS):

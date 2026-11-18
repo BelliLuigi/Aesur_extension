@@ -65,6 +65,7 @@ parser.add_argument("--epochs", type=int, default=800, help="Training epochs (de
 parser.add_argument("--small", action=argparse.BooleanOptionalAction, default=False, help="Use small dataset variant (NRSur7dq4v2_dataset_small.hdf) (default: False)")
 parser.add_argument("--compile", action=argparse.BooleanOptionalAction, default=False, help="Enable/disable torch.compile (default: False)")
 parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=False, help="Enable/disable TF32 precision on CUDA (default: False)")
+parser.add_argument("--f64", action=argparse.BooleanOptionalAction, default=False, help="Enable/disable float64 (double) precision training (default: False)")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -80,8 +81,13 @@ LR = 1e-3
 WARMUP_STEPS = 200
 EARLY_STOP = 0
 
-# Configure Precision (TF32 vs. standard FP32)
-if args.tf32 and torch.cuda.is_available():
+# Configure Precision (FP64 vs. TF32 vs. standard FP32)
+model_dtype = torch.float64 if args.f64 else torch.float32
+if args.f64:
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    print("Precision: Float64 (double precision).")
+elif args.tf32 and torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.set_float32_matmul_precision("high")
     torch.backends.cudnn.allow_tf32 = True
@@ -193,7 +199,7 @@ l_test_loader = DataLoader(l_test, batch_size=2048, shuffle=False)
 # ---------------------------------------------------------------------------
 # Model, Loss Function & Regularization
 # ---------------------------------------------------------------------------
-raw_model_logfreq = AutoencoderMono().to(device)
+raw_model_logfreq = AutoencoderMono().to(device=device, dtype=model_dtype)
 init_kaiming_weights(raw_model_logfreq)
 
 if args.compile:
