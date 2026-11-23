@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument(
         "--pod_hdf",
         type=str,
-        default="datasets/NRSur7dq4v2_small_pod_k256.hdf",
+        default="datasets/NRSur7dq4v2_podk256_dataset.hdf",
         help="Input POD HDF5 created by pod_complex_save.py",
     )
     parser.add_argument("--batch_size", type=int, default=256, help="Mini-batch size (default: 256)")
@@ -111,7 +111,7 @@ def make_loss_fn(loss_name: str):
 
 
 def make_soap_and_cosine(params, lr: float, min_lr: float, total_steps: int, f64: bool, warmup_steps: int = 0):
-    soap_eps = 1e-12 if f64 else 1e-8
+    soap_eps = 1e-14 if f64 else 1e-8
     optimizer = opt_add.SOAP(
         params,
         lr=lr,
