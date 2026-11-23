@@ -131,7 +131,7 @@ class PODMapper(nn.Module):
     def __init__(
         self,
         in_params: int = 7,
-        hidden_dims: tuple[int, ...] = (16, 32, 64),
+        hidden_dims: tuple[int, ...] = (32, 128, 128),
         latent_dim: int = 64,
         dtype: torch.dtype = torch.float64,
     ):
