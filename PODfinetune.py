@@ -111,7 +111,8 @@ def build_full_model_from_ckpt(ckpt: dict, device: torch.device):
     dtype = torch.float64 if f64 else torch.float32
     pod_hdf = str(ckpt["pod_hdf"])
 
-    mapper = PODMapper(in_params=7, hidden_dims=(16, 32, 64), latent_dim=64, dtype=dtype)
+    mapper_hidden = tuple(ckpt.get("mapper_hidden", (16, 32, 64)))  # old checkpoints used (16, 32, 64)
+    mapper = PODMapper(in_params=7, hidden_dims=mapper_hidden, latent_dim=64, dtype=dtype)
     decoder = PODDecoder(latent_dim=64, hidden_dims=(128, 256), out_dim=2 * k, dtype=dtype)
     recon = PODReconstructor.from_hdf5(pod_hdf, trainable=False, dtype=dtype)
     model = PODFullModel(mapper, decoder, recon).to(device)

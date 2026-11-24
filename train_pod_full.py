@@ -2,8 +2,9 @@
 """
 Full 3-stage training pipeline for the complex128 POD + Autoencoder + Mapper surrogate:
   Stage 1: PODAutoencoder (512 -> 256 -> 128 -> 64 -> 128 -> 256 -> 512), 1200 epochs, cosine 1e-3 -> 1e-7
-  Stage 2: PODMapper (7 -> 16 -> 32 -> 64 -> 64) + frozen PODDecoder, 600 epochs, cosine 1e-3 -> 1e-6
-  Stage 3: PODFull (PODMapper + unfrozen PODDecoder), 600 epochs, cosine 5e-5 -> 5e-7
+  Stage 2: PODMapper (7 -> --mapper_hidden (default 32,128,128) -> 64) + frozen PODDecoder, 600 epochs, cosine 1e-3 -> 1e-6
+  Stage 3: PODFull (PODMapper + unfrozen PODDecoder), 600 epochs, cosine 5e-5 -> 5e-7,
+           trained end-to-end on the reconstructed waveform mismatch (--joint_loss, default log_mismatch)
   Eval:    Computes and plots test-set waveform mismatch (TasosOverlapTorch) after EACH stage.
 """
 import argparse
@@ -81,11 +82,32 @@ def parse_args():
     parser.add_argument("--min_lr_joint", type=float, default=5e-7, help="Stage 3 cosine min LR (default: 5e-7)")
 
     parser.add_argument(
+        "--mapper_hidden",
+        type=int,
+        nargs="+",
+        default=[32, 128, 128],
+        help="PODMapper hidden layer widths (default: 32 128 128)",
+    )
+
+    parser.add_argument(
         "--loss",
         type=str,
         choices=["rel_l2", "mse", "l1"],
         default="rel_l2",
-        help="Coefficient reconstruction loss (default: rel_l2)",
+        help="Coefficient reconstruction loss for Stages 1-2 (default: rel_l2)",
+    )
+    parser.add_argument(
+        "--joint_loss",
+        type=str,
+        choices=["log_mismatch", "mismatch", "coeff"],
+        default="log_mismatch",
+        help="Stage 3 loss: end-to-end waveform mismatch (log or linear), or 'coeff' to reuse --loss (default: log_mismatch)",
+    )
+    parser.add_argument(
+        "--norm_weight",
+        type=float,
+        default=1.0,
+        help="Stage 3 weight of the waveform-norm penalty (||h_pred||/||h_true|| - 1)^2 (default: 1.0)",
     )
     parser.add_argument(
         "--f64",
@@ -108,6 +130,35 @@ def make_loss_fn(loss_name: str):
     if loss_name == "mse":
         return nn.MSELoss()
     return nn.L1Loss()
+
+
+def make_waveform_loss_fn(recon: PODReconstructor, mode: str, norm_weight: float, floor: float = 1e-16):
+    """
+    End-to-end waveform loss: coefficients -> PODReconstructor -> complex waveform, then a per-sample
+    mismatch identical to TasosOverlapTorch (Parseval: FFT inner products == time-domain inner products).
+    Mismatch is computed as 0.5 * ||h_t/|h_t| - h_p/|h_p|||^2 (== 1 - Re<h_t,h_p>/(|h_t||h_p|)),
+    which avoids the 1 - overlap cancellation near 1e-8. A norm penalty keeps the absolute amplitude
+    physical, since the mismatch itself is scale-invariant.
+    """
+
+    def per_sample_error(pred_c: torch.Tensor, target_c: torch.Tensor) -> torch.Tensor:
+        h_p = recon(pred_c)
+        h_t = recon(target_c)
+        n_p = torch.linalg.vector_norm(h_p, dim=-1, keepdim=True)
+        n_t = torch.linalg.vector_norm(h_t, dim=-1, keepdim=True)
+        diff = h_t / n_t - h_p / n_p.clamp(min=1e-300)
+        mm = 0.5 * torch.sum(diff.real ** 2 + diff.imag ** 2, dim=-1)
+        norm_err = (n_p / n_t - 1.0).squeeze(-1) ** 2
+        return mm + norm_weight * norm_err
+
+    if mode == "log_mismatch":
+        def log_mismatch(pred_c: torch.Tensor, target_c: torch.Tensor) -> torch.Tensor:
+            return torch.mean(torch.log10(per_sample_error(pred_c, target_c) + floor))
+        return log_mismatch
+
+    def mismatch(pred_c: torch.Tensor, target_c: torch.Tensor) -> torch.Tensor:
+        return torch.mean(per_sample_error(pred_c, target_c))
+    return mismatch
 
 
 def make_soap_and_cosine(params, lr: float, min_lr: float, total_steps: int, f64: bool, warmup_steps: int = 0):
@@ -288,8 +339,9 @@ def plot_curves(histories: dict, out_path: str, title: str):
         axes = [axes]
     for ax, (stage_name, (tr_h, va_h)) in zip(axes, active):
         ep = np.arange(1, len(tr_h) + 1)
-        ax.semilogy(ep, tr_h, label="Train", lw=1.6)
-        ax.semilogy(ep, va_h, label="Val", lw=1.6)
+        plot_fn = ax.semilogy if min(min(tr_h), min(va_h)) > 0 else ax.plot  # log-mismatch loss is negative
+        plot_fn(ep, tr_h, label="Train", lw=1.6)
+        plot_fn(ep, va_h, label="Val", lw=1.6)
         ax.set_title(stage_name, fontweight="bold")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
@@ -383,7 +435,8 @@ def main():
     print(f"Splits: train={len(train_idx)}, val={len(val_idx)}, test={len(test_idx)}")
 
     ae = PODAutoencoder(in_dim=2 * k, hidden_dims=(256, 128), latent_dim=64, dtype=dtype).to(device)
-    mapper = PODMapper(in_params=params_norm.shape[1], hidden_dims=(16, 32, 64), latent_dim=64, dtype=dtype).to(device)
+    mapper_hidden = tuple(args.mapper_hidden)
+    mapper = PODMapper(in_params=params_norm.shape[1], hidden_dims=mapper_hidden, latent_dim=64, dtype=dtype).to(device)
     recon = PODReconstructor.from_hdf5(args.pod_hdf, trainable=False, dtype=dtype).to(device)
     print(
         f"Params: AE={count_parameters(ae):,}, Mapper={count_parameters(mapper):,}, "
@@ -396,6 +449,8 @@ def main():
         "f64": args.f64,
         "param_mu": p_mu.cpu(),
         "param_sd": p_sd.cpu(),
+        "mapper_hidden": mapper_hidden,
+        "joint_loss": args.joint_loss,
     }
 
     loss_fn = make_loss_fn(args.loss)
@@ -490,14 +545,18 @@ def main():
     for p in ae.decoder.parameters():
         p.requires_grad_(True)
     stage3_params = list(mapper.parameters()) + list(ae.decoder.parameters())
+    if args.joint_loss == "coeff":
+        joint_loss_fn = loss_fn
+    else:
+        joint_loss_fn = make_waveform_loss_fn(recon, args.joint_loss, args.norm_weight)
 
     tr_joint, va_joint, best_stage3_state = run_stage(
-        "Stage 3: PODFull (Mapper + Decoder)",
+        f"Stage 3: PODFull (Mapper + Decoder, loss={args.joint_loss})",
         stage2_model,
         stage3_params,
         p_train_loader,
         p_val_loader,
-        loss_fn,
+        joint_loss_fn,
         args.joint_epochs,
         args.lr_joint,
         args.min_lr_joint,
